@@ -1,0 +1,78 @@
+# 环境配置文件
+.env
+.env.local
+.env.development
+.env.test
+.env.production
+
+# Python缓存文件
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# 测试文件和结果
+test_*
+*_test.py
+*_test_*.py
+test_results/
+tests/
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+
+# 输出文件
+output/
+outputs/
+generated/
+*.out
+*.output
+final_markdown_merged_document_*.md
+regenerated_sections_*.json
+regenerated_sections_*.md
+analysis_*.json
+
+# 日志文件
+*.log
+logs/
+log/
+document_optimization.log
+document_quality_analysis.log
+
+# IDE和编辑器文件
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# 临时文件
+tmp/
+temp/
+*.tmp
+*.temp
+*.bak
+*.backup
+
+# 虚拟环境
+venv/
+env/
+ENV/
+.venv/
+
+# 分发和打包
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# 其他
+*.pid
+*.seed
+*.pid.lock

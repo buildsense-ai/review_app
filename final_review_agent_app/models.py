@@ -135,7 +135,7 @@ class TaskResultResponse(BaseModel):
     """任务结果响应模型"""
     task_id: str = Field(..., description="任务ID")
     status: TaskStatus = Field(..., description="任务状态")
-    result: Optional[OptimizationResult] = Field(None, description="优化结果（仅当状态为completed时）")
+    result: Optional[Dict[str, Any]] = Field(None, description="优化结果（仅当状态为completed时）")
     error_message: Optional[str] = Field(None, description="错误信息（仅当状态为failed时）")
     created_at: datetime = Field(..., description="创建时间")
     completed_at: Optional[datetime] = Field(None, description="完成时间")

@@ -14,7 +14,7 @@ from typing import Dict, Optional, Any
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 
-from models import TaskStatus, OptimizationResult, SectionResult
+from models import TaskStatus, OptimizationResult
 from run_document_optimizer import DocumentOptimizer
 import re
 import json
@@ -62,52 +62,167 @@ class TaskManager:
         self.logger.info(f"✅ TaskManager初始化完成，最大并发数: {max_workers}")
     
     def _generate_unified_sections(self, original_content: str, optimized_content: str, 
-                                 modifications_applied: list, table_optimizations_applied: list) -> Dict[str, SectionResult]:
-        """生成统一格式的章节结果"""
+                                 modifications_applied: list, table_optimizations_applied: list) -> Dict[str, dict]:
+        """生成统一格式的章节结果 - 使用一级标题嵌套二级标题的结构"""
         unified_sections = {}
         
-        # 解析原始内容的章节
-        original_sections = self._parse_sections(original_content)
-        # 解析优化后内容的章节
-        optimized_sections = self._parse_sections(optimized_content)
+        # 解析原始内容的层级章节
+        original_hierarchy = self._parse_hierarchical_sections(original_content)
+        # 解析优化后内容的层级章节
+        optimized_hierarchy = self._parse_hierarchical_sections(optimized_content)
         
-        # 为每个章节生成结果
-        for section_title, original_section_content in original_sections.items():
-            optimized_section_content = optimized_sections.get(section_title, original_section_content)
+        # 为每个一级标题生成结果
+        for h1_title, h2_sections in original_hierarchy.items():
+            unified_sections[h1_title] = {}
             
-            # 查找该章节的修改建议
-            suggestion = ""
-            for mod in modifications_applied:
-                if mod.get('subtitle') == section_title or mod.get('section_title') == section_title:
-                    suggestion = mod.get('suggestion', mod.get('instruction', ''))
-                    break
-            
-            # 查找表格优化建议
-            for table_opt in table_optimizations_applied:
-                if table_opt.get('section_title') == section_title:
-                    if suggestion:
-                        suggestion += "; " + table_opt.get('table_opportunity', '')
-                    else:
-                        suggestion = table_opt.get('table_opportunity', '')
-                    break
-            
-            if not suggestion:
-                suggestion = "无需修改"
-            
-            # 计算字数
-            word_count = len(optimized_section_content.replace(' ', '').replace('\n', ''))
-            
-            unified_sections[section_title] = SectionResult(
-                section_title=section_title,
-                original_content=original_section_content,
-                suggestion=suggestion,
-                regenerated_content=optimized_section_content,
-                word_count=word_count,
-                status="success"
-            )
+            # 为每个二级标题生成结果
+            for h2_title, original_section_content in h2_sections.items():
+                optimized_section_content = optimized_hierarchy.get(h1_title, {}).get(h2_title, original_section_content)
+                
+                # 查找该章节的修改建议
+                suggestion = ""
+                
+                # 调试信息
+                self.logger.info(f"查找章节 '{h2_title}' 的修改建议")
+                self.logger.info(f"可用的modification_instructions: {modifications_applied}")
+                self.logger.info(f"可用的table_optimizations: {table_optimizations_applied}")
+                
+                for mod in modifications_applied:
+                    # 处理单章节建议 (subtitle)
+                    if 'subtitle' in mod:
+                        mod_title = mod.get('subtitle', '')
+                        if (mod_title == h2_title or 
+                            mod_title == f"{h1_title} {h2_title}" or
+                            h2_title in mod_title or
+                            mod_title in h2_title):
+                            suggestion = mod.get('suggestion', mod.get('instruction', ''))
+                            self.logger.info(f"找到单章节匹配建议: {mod_title} -> {suggestion[:100]}...")
+                            break
+                    
+                    # 处理跨章节建议 (subtitles)
+                    elif 'subtitles' in mod:
+                        subtitles = mod.get('subtitles', [])
+                        for subtitle in subtitles:
+                            if (subtitle == h2_title or 
+                                subtitle == f"{h1_title} {h2_title}" or
+                                h2_title in subtitle or
+                                subtitle in h2_title):
+                                suggestion = mod.get('suggestion', mod.get('instruction', ''))
+                                self.logger.info(f"找到跨章节匹配建议: {subtitle} -> {suggestion[:100]}...")
+                                break
+                        if suggestion:  # 如果找到了跨章节建议，跳出外层循环
+                            break
+                
+                # 查找表格优化建议
+                for table_opt in table_optimizations_applied:
+                    table_title = table_opt.get('section_title', '')
+                    if (table_title == h2_title or 
+                        table_title == f"{h1_title} {h2_title}" or
+                        h2_title in table_title or
+                        table_title in h2_title):
+                        table_suggestion = table_opt.get('table_opportunity', '')
+                        if suggestion:
+                            suggestion += "; " + table_suggestion
+                        else:
+                            suggestion = table_suggestion
+                        self.logger.info(f"找到匹配的表格优化建议: {table_title} -> {table_suggestion[:100]}...")
+                        break
+                
+                # 如果没有找到任何AI建议，跳过该章节
+                if not suggestion:
+                    self.logger.info(f"章节 '{h2_title}' 没有找到AI建议，跳过")
+                    continue
+                
+                # 检查内容是否真的被修改了
+                # 去除格式差异进行比较
+                original_clean = original_section_content.strip().replace('\n\n', '\n')
+                optimized_clean = optimized_section_content.strip().replace('\n\n', '\n')
+                
+                # 如果内容完全相同（除了格式），说明LLM修改可能失败了
+                if original_clean == optimized_clean:
+                    self.logger.warning(f"章节 '{h2_title}' 有建议但内容未改变，可能LLM修改失败")
+                    # 可以选择跳过或者标记状态
+                    continue
+                
+                # 只有有修改建议且内容真正变化的章节才包含在输出中
+                # 计算字数
+                word_count = len(optimized_section_content.replace(' ', '').replace('\n', ''))
+                
+                # 确保一级标题存在
+                if h1_title not in unified_sections:
+                    unified_sections[h1_title] = {}
+                
+                unified_sections[h1_title][h2_title] = {
+                    "original_content": original_section_content,
+                    "suggestion": suggestion,
+                    "regenerated_content": optimized_section_content,
+                    "word_count": word_count,
+                    "status": "success"
+                }
         
         return unified_sections
     
+    def _parse_hierarchical_sections(self, content: str) -> Dict[str, Dict[str, str]]:
+        """解析Markdown内容的层级章节结构"""
+        hierarchy = {}
+        lines = content.split('\n')
+        
+        current_h1 = None
+        current_h2 = None
+        current_content = []
+        
+        for line in lines:
+            line_stripped = line.strip()
+            
+            # 检测一级标题 (# 标题)
+            if line_stripped.startswith('# ') and not line_stripped.startswith('## '):
+                # 保存之前的二级标题内容
+                if current_h1 and current_h2:
+                    if current_h1 not in hierarchy:
+                        hierarchy[current_h1] = {}
+                    hierarchy[current_h1][current_h2] = '\n'.join(current_content).strip()
+                
+                # 开始新的一级标题
+                current_h1 = line_stripped[2:].strip()
+                current_h2 = None
+                current_content = []
+                
+            # 检测二级标题 (## 标题)
+            elif line_stripped.startswith('## '):
+                # 保存之前的二级标题内容
+                if current_h1 and current_h2:
+                    if current_h1 not in hierarchy:
+                        hierarchy[current_h1] = {}
+                    hierarchy[current_h1][current_h2] = '\n'.join(current_content).strip()
+                
+                # 开始新的二级标题
+                if current_h1:  # 确保有一级标题
+                    current_h2 = line_stripped[3:].strip()
+                    current_content = [line]  # 包含标题行
+                else:
+                    # 如果没有一级标题，创建默认的
+                    current_h1 = "文档内容"
+                    current_h2 = line_stripped[3:].strip()
+                    current_content = [line]
+                    
+            else:
+                # 普通内容行
+                if current_h1 and current_h2:
+                    current_content.append(line)
+                elif current_h1 and not current_h2:
+                    # 一级标题下没有二级标题的内容，跳过空行，等待二级标题
+                    if line.strip():  # 只有非空行才创建默认二级标题
+                        current_h2 = "概述"
+                        current_content = [line]
+        
+        # 保存最后一个章节
+        if current_h1 and current_h2:
+            if current_h1 not in hierarchy:
+                hierarchy[current_h1] = {}
+            hierarchy[current_h1][current_h2] = '\n'.join(current_content).strip()
+        
+        return hierarchy
+
     def _parse_sections(self, content: str) -> Dict[str, str]:
         """解析Markdown内容的章节"""
         sections = {}
@@ -244,17 +359,15 @@ class TaskManager:
                 task_info.progress = 70.0
                 task_info.message = "正在分章节优化文档内容..."
                 
-                result_paths = self.optimizer.regenerate_and_merge_document(
-                    evaluation_file=analysis_file_path,
-                    document_file=temp_file_path,
-                    output_dir="./test_results",
-                    auto_merge=False
-                )
-                optimized_file_path = result_paths.get('regenerated_sections')
+                # 直接获取优化后的内容，不生成中间文件
+                regeneration_results = self.optimizer.regenerate_document_sections(analysis_file_path, temp_file_path)
+                self.logger.info(f"🔧 regeneration_results 包含 {len(regeneration_results)} 个章节")
+                for section_title, result in regeneration_results.items():
+                    status = result.get('status', 'unknown')
+                    self.logger.info(f"  - {section_title}: {status}")
                 
-                # 读取优化结果
-                with open(optimized_file_path, 'r', encoding='utf-8') as f:
-                    optimized_content = f.read()
+                optimized_content = self.optimizer._generate_markdown_content(regeneration_results, temp_file_path)
+                self.logger.info(f"🔧 优化后内容长度: {len(optimized_content)} 字符")
                 
                 # 读取分析结果
                 import json
@@ -271,18 +384,29 @@ class TaskManager:
                     analysis_data.get('table_opportunities', [])
                 )
                 
-                # 构建结果
-                result = OptimizationResult(
-                    original_content=task_info.content,
-                    optimized_content=optimized_content,
-                    analysis_summary=analysis_data.get('analysis_summary', '优化完成'),
-                    sections_modified=len(analysis_data.get('modification_instructions', [])),
-                    tables_optimized=len(analysis_data.get('table_opportunities', [])),
-                    modifications_applied=analysis_data.get('modification_instructions', []),
-                    table_optimizations_applied=analysis_data.get('table_opportunities', []),
-                    processing_time=processing_time,
-                    unified_sections=unified_sections
-                )
+                # 生成两个输出文件
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                
+                # 1. 生成unified_sections JSON文件
+                unified_sections_file = f"./test_results/unified_sections_{timestamp}.json"
+                os.makedirs("./test_results", exist_ok=True)
+                with open(unified_sections_file, 'w', encoding='utf-8') as f:
+                    json.dump(unified_sections, f, ensure_ascii=False, indent=2)
+                
+                # 2. 生成优化后的markdown文件
+                optimized_md_file = f"./test_results/optimized_content_{task_id}.md"
+                with open(optimized_md_file, 'w', encoding='utf-8') as f:
+                    f.write(optimized_content)
+                
+                # 构建简化的结果 - 只返回文件路径和基本信息
+                result = {
+                    "unified_sections_file": unified_sections_file,
+                    "optimized_content_file": optimized_md_file,
+                    "processing_time": processing_time,
+                    "sections_count": len(unified_sections),
+                    "service_type": "final_review",
+                    "message": f"已生成2个文件: {os.path.basename(unified_sections_file)}, {os.path.basename(optimized_md_file)}"
+                }
                 
                 # 更新任务状态
                 task_info.status = TaskStatus.COMPLETED

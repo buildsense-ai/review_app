@@ -774,10 +774,15 @@ class ThesisDocumentRegenerator:
         """
         基于Markdown内容生成完整文档
         """
+        self.logger.info(f"开始基于Markdown内容生成完整文档，regenerated_sections数量: {len(regenerated_sections)}")
+        if regenerated_sections:
+            self.logger.info(f"regenerated_sections键: {list(regenerated_sections.keys())}")
+        
         lines = original_content.split('\n')
         new_lines = []
         current_section = None
         in_section_content = False
+        skip_content = False
         
         # 添加核心论点说明
         main_thesis = thesis_data.get('main_thesis', '')
@@ -790,63 +795,96 @@ class ThesisDocumentRegenerator:
                 "",
             ])
         
-        for line in lines:
+        for i, line in enumerate(lines):
             # 检查是否是标题（一级、二级、三级）
-            if line.startswith('### '):
-                # 三级标题处理
-                if current_section and current_section in regenerated_sections:
-                    # 添加修正后的内容
-                    new_lines.append("*[本章节已根据论点一致性要求进行修正]*")
-                    new_lines.append("")
-                    new_lines.append(regenerated_sections[current_section]['content'])
-                    new_lines.append("")
-                
-                # 开始新章节
-                current_section = line[4:].strip()
-                new_lines.append(line)
-                new_lines.append("")
-                in_section_content = True
-                
-                # 如果这个章节需要修正，跳过原始内容
-                if current_section in regenerated_sections:
-                    continue
+            if line.startswith('### ') or line.startswith('## '):
+                # 处理上一个章节的修正内容
+                if current_section and skip_content:
+                    # 查找匹配的regenerated_sections
+                    matched_section = None
+                    for section_key in regenerated_sections.keys():
+                        if (section_key == current_section or 
+                            current_section in section_key or 
+                            section_key in current_section):
+                            matched_section = section_key
+                            break
                     
-            elif line.startswith('## '):
-                # 二级标题处理
-                if current_section and current_section in regenerated_sections:
-                    # 添加修正后的内容
-                    new_lines.append("*[本章节已根据论点一致性要求进行修正]*")
-                    new_lines.append("")
-                    new_lines.append(regenerated_sections[current_section]['content'])
-                    new_lines.append("")
+                    if matched_section:
+                        new_lines.append("*[本章节已根据论点一致性要求进行修正]*")
+                        new_lines.append("")
+                        new_lines.append(regenerated_sections[matched_section]['content'])
+                        new_lines.append("")
+                        self.logger.info(f"已替换章节: {current_section} -> {matched_section}")
                 
                 # 开始新章节
-                current_section = line[3:].strip()
+                if line.startswith('### '):
+                    current_section = line[4:].strip()
+                else:  # line.startswith('## ')
+                    current_section = line[3:].strip()
+                
                 new_lines.append(line)
                 new_lines.append("")
                 in_section_content = True
                 
-                # 如果这个章节需要修正，跳过原始内容
-                if current_section in regenerated_sections:
-                    continue
-            
-            elif line.startswith('# ') or (current_section and current_section in regenerated_sections and in_section_content):
-                # 一级标题或需要修正的章节内容，直接跳过原始内容
-                if line.startswith('# '):
-                    in_section_content = False
-                    new_lines.append(line)
+                # 检查这个章节是否需要修正
+                skip_content = False
+                for section_key in regenerated_sections.keys():
+                    if (section_key == current_section or 
+                        current_section in section_key or 
+                        section_key in current_section):
+                        skip_content = True
+                        self.logger.info(f"找到需要修正的章节: {current_section} 匹配 {section_key}")
+                        break
+                        
+            elif line.startswith('# '):
+                # 一级标题，结束当前章节
+                if current_section and skip_content:
+                    # 处理当前章节的修正内容
+                    matched_section = None
+                    for section_key in regenerated_sections.keys():
+                        if (section_key == current_section or 
+                            current_section in section_key or 
+                            section_key in current_section):
+                            matched_section = section_key
+                            break
+                    
+                    if matched_section:
+                        new_lines.append("*[本章节已根据论点一致性要求进行修正]*")
+                        new_lines.append("")
+                        new_lines.append(regenerated_sections[matched_section]['content'])
+                        new_lines.append("")
+                        self.logger.info(f"已替换章节: {current_section} -> {matched_section}")
+                
+                in_section_content = False
+                skip_content = False
+                current_section = None
+                new_lines.append(line)
+            elif skip_content and in_section_content:
+                # 跳过需要修正章节的原始内容
                 continue
             else:
                 # 其他内容直接添加
                 new_lines.append(line)
         
         # 处理最后一个章节
-        if current_section and current_section in regenerated_sections:
-            new_lines.append("*[本章节已根据论点一致性要求进行修正]*")
-            new_lines.append("")
-            new_lines.append(regenerated_sections[current_section]['content'])
+        if current_section and skip_content:
+            matched_section = None
+            for section_key in regenerated_sections.keys():
+                if (section_key == current_section or 
+                    current_section in section_key or 
+                    section_key in current_section):
+                    matched_section = section_key
+                    break
+            
+            if matched_section:
+                new_lines.append("*[本章节已根据论点一致性要求进行修正]*")
+                new_lines.append("")
+                new_lines.append(regenerated_sections[matched_section]['content'])
+                self.logger.info(f"已替换最后章节: {current_section} -> {matched_section}")
         
-        return "\n".join(new_lines)
+        result = "\n".join(new_lines)
+        self.logger.info(f"生成的完整文档长度: {len(result)}")
+        return result
     
     def _save_regeneration_results(self, regenerated_sections: Dict, complete_document: str, 
                                  thesis_data: Dict, output_dir: str) -> Dict[str, str]:

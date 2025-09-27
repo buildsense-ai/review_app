@@ -51,14 +51,14 @@ processing_tasks = {}
 # =============================================================================
 
 def generate_unified_sections(original_content: str, enhanced_content: str, 
-                            evidence_analysis: Dict[str, Any]) -> Dict[str, SectionResult]:
-    """生成统一格式的章节结果"""
+                            evidence_analysis: Dict[str, Any]) -> Dict[str, dict]:
+    """生成统一格式的章节结果 - 使用一级标题嵌套二级标题的结构"""
     unified_sections = {}
     
-    # 解析原始内容的章节
-    original_sections = parse_sections(original_content)
-    # 解析增强后内容的章节
-    enhanced_sections = parse_sections(enhanced_content) if enhanced_content else original_sections
+    # 解析原始内容的层级章节
+    original_hierarchy = parse_hierarchical_sections(original_content)
+    # 解析增强后内容的层级章节
+    enhanced_hierarchy = parse_hierarchical_sections(enhanced_content) if enhanced_content else original_hierarchy
     
     # 从证据分析中提取章节信息
     section_claims = {}
@@ -69,34 +69,116 @@ def generate_unified_sections(original_content: str, enhanced_content: str,
                 section_claims[section_title] = []
             section_claims[section_title].append(claim)
     
-    # 为每个章节生成结果
-    for section_title, original_section_content in original_sections.items():
-        enhanced_section_content = enhanced_sections.get(section_title, original_section_content)
+    # 为每个一级标题生成结果
+    for h1_title, h2_sections in original_hierarchy.items():
+        unified_sections[h1_title] = {}
         
-        # 生成该章节的建议
-        suggestion = ""
-        claims = section_claims.get(section_title, [])
-        if claims:
-            claim_count = len(claims)
-            evidence_count = sum(len(claim.get('evidence_sources', [])) for claim in claims)
-            suggestion = f"检测到{claim_count}个论断，找到{evidence_count}条支撑证据"
-        else:
-            suggestion = "未检测到需要证据支撑的论断"
-        
-        # 计算字数
-        word_count = len(enhanced_section_content.replace(' ', '').replace('\n', ''))
-        
-        unified_sections[section_title] = SectionResult(
-            section_title=section_title,
-            original_content=original_section_content,
-            suggestion=suggestion,
-            regenerated_content=enhanced_section_content,
-            word_count=word_count,
-            status="success"
-        )
+        # 为每个二级标题生成结果
+        for h2_title, original_section_content in h2_sections.items():
+            enhanced_section_content = enhanced_hierarchy.get(h1_title, {}).get(h2_title, original_section_content)
+            
+            # 生成该章节的建议
+            suggestion = ""
+            # 尝试多种匹配方式查找claims
+            claims = []
+            for section_title, section_claims_list in section_claims.items():
+                if (section_title == h2_title or 
+                    section_title == f"{h1_title} {h2_title}" or
+                    section_title == f"{h1_title}_{h2_title}" or
+                    h2_title in section_title or
+                    section_title in h2_title):
+                    claims.extend(section_claims_list)
+            
+            if claims:
+                claim_count = len(claims)
+                evidence_count = sum(len(claim.get('evidence_sources', [])) for claim in claims)
+                suggestion = f"检测到{claim_count}个论断，找到{evidence_count}条支撑证据"
+            else:
+                if original_section_content != enhanced_section_content:
+                    suggestion = "内容已增强"
+                else:
+                    # 跳过无需修改的章节，不包含在输出中
+                    continue
+            
+            # 只有有论断分析或内容变化的章节才包含在输出中
+            # 计算字数
+            word_count = len(enhanced_section_content.replace(' ', '').replace('\n', ''))
+            
+            # 确保一级标题存在
+            if h1_title not in unified_sections:
+                unified_sections[h1_title] = {}
+            
+            unified_sections[h1_title][h2_title] = {
+                "original_content": original_section_content,
+                "suggestion": suggestion,
+                "regenerated_content": enhanced_section_content,
+                "word_count": word_count,
+                "status": "success"
+            }
     
     return unified_sections
 
+
+def parse_hierarchical_sections(content: str) -> Dict[str, Dict[str, str]]:
+    """解析Markdown内容的层级章节结构"""
+    hierarchy = {}
+    lines = content.split('\n')
+    
+    current_h1 = None
+    current_h2 = None
+    current_content = []
+    
+    for line in lines:
+        line_stripped = line.strip()
+        
+        # 检测一级标题 (# 标题)
+        if line_stripped.startswith('# ') and not line_stripped.startswith('## '):
+            # 保存之前的二级标题内容
+            if current_h1 and current_h2:
+                if current_h1 not in hierarchy:
+                    hierarchy[current_h1] = {}
+                hierarchy[current_h1][current_h2] = '\n'.join(current_content).strip()
+            
+            # 开始新的一级标题
+            current_h1 = line_stripped[2:].strip()
+            current_h2 = None
+            current_content = []
+            
+        # 检测二级标题 (## 标题)
+        elif line_stripped.startswith('## '):
+            # 保存之前的二级标题内容
+            if current_h1 and current_h2:
+                if current_h1 not in hierarchy:
+                    hierarchy[current_h1] = {}
+                hierarchy[current_h1][current_h2] = '\n'.join(current_content).strip()
+            
+            # 开始新的二级标题
+            if current_h1:  # 确保有一级标题
+                current_h2 = line_stripped[3:].strip()
+                current_content = [line]  # 包含标题行
+            else:
+                # 如果没有一级标题，创建默认的
+                current_h1 = "文档内容"
+                current_h2 = line_stripped[3:].strip()
+                current_content = [line]
+                
+        else:
+            # 普通内容行
+            if current_h1 and current_h2:
+                current_content.append(line)
+            elif current_h1 and not current_h2:
+                # 一级标题下没有二级标题的内容，跳过空行，等待二级标题
+                if line.strip():  # 只有非空行才创建默认二级标题
+                    current_h2 = "概述"
+                    current_content = [line]
+    
+    # 保存最后一个章节
+    if current_h1 and current_h2:
+        if current_h1 not in hierarchy:
+            hierarchy[current_h1] = {}
+        hierarchy[current_h1][current_h2] = '\n'.join(current_content).strip()
+    
+    return hierarchy
 
 def parse_sections(content: str) -> Dict[str, str]:
     """解析Markdown内容的章节"""
@@ -914,19 +996,36 @@ async def process_document_background(
                 evidence_analysis
             )
             
+            # 生成两个输出文件
+            import os
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            
+            # 1. 生成unified_sections JSON文件
+            unified_sections_file = f"./test_results/unified_sections_{timestamp}.json"
+            os.makedirs("./test_results", exist_ok=True)
+            with open(unified_sections_file, 'w', encoding='utf-8') as f:
+                json.dump(unified_sections, f, ensure_ascii=False, indent=2)
+            
+            # 2. 生成增强后的markdown文件
+            enhanced_md_file = f"./test_results/enhanced_content_{task_id}.md"
+            with open(enhanced_md_file, 'w', encoding='utf-8') as f:
+                f.write(enhanced_content)
+            
+            # 构建简化的结果 - 只返回文件路径和基本信息
+            unified_result = {
+                "unified_sections_file": unified_sections_file,
+                "optimized_content_file": enhanced_md_file,
+                "processing_time": result['processing_time'],
+                "sections_count": len(unified_sections),
+                "service_type": "web_agent",
+                "message": f"已生成2个文件: {os.path.basename(unified_sections_file)}, {os.path.basename(enhanced_md_file)}"
+            }
+            
             processing_tasks[task_id].update({
                 "status": "completed",
                 "progress": "处理完成",
                 "completed_at": datetime.now().isoformat(),
-                "result": DocumentProcessResponse(
-                    task_id=task_id,
-                    status="completed",
-                    message="文档处理成功完成",
-                    processing_time=result['processing_time'],
-                    statistics=result['statistics'],
-                    output_files=result['output_files'],
-                    unified_sections=unified_sections
-                )
+                "result": unified_result
             })
         else:
             processing_tasks[task_id].update({

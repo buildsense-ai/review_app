@@ -86,93 +86,189 @@ class SectionResult(BaseModel):
 
 def generate_unified_sections(original_content: str, corrected_content: str, 
                             consistency_issues: List[ConsistencyIssue],
-                            regenerated_sections: Dict[str, Dict[str, Any]] = None) -> Dict[str, SectionResult]:
-    """生成统一格式的章节结果"""
+                            regenerated_sections: Dict[str, Dict[str, Any]] = None) -> Dict[str, dict]:
+    """生成统一格式的章节结果 - 使用一级标题嵌套二级标题的结构"""
+    import logging
+    logger = logging.getLogger(__name__)
+    
+    logger.info(f"开始生成unified_sections，一致性问题数量: {len(consistency_issues)}")
+    if consistency_issues:
+        for i, issue in enumerate(consistency_issues):
+            logger.info(f"一致性问题 {i+1}: 章节='{issue.section_title}', 建议='{issue.suggestion}', 描述='{issue.description}'")
+    
     unified_sections = {}
     
-    # 解析原始内容的章节
-    original_sections = parse_sections(original_content)
+    # 解析原始内容的层级章节
+    original_hierarchy = parse_hierarchical_sections(original_content)
     
     # 如果有regenerated_sections，优先使用它们的详细信息
     if regenerated_sections:
-        # 处理所有有一致性问题的章节
-        for issue in consistency_issues:
-            section_title = issue.section_title
+        # 为每个一级标题生成结果
+        for h1_title, h2_sections in original_hierarchy.items():
+            unified_sections[h1_title] = {}
             
-            # 从regenerated_sections获取详细信息
-            if section_title in regenerated_sections:
-                section_data = regenerated_sections[section_title]
+            # 为每个二级标题生成结果
+            for h2_title, original_section_content in h2_sections.items():
+                # 查找该章节的一致性问题和建议
+                section_data = None
+                suggestion = ""
+                regenerated_content = original_section_content
+                found_issue = False
                 
-                # 获取原始内容（从原始文档中提取）
-                original_section_content = original_sections.get(section_title, "")
+                # 首先查找一致性问题
+                for issue in consistency_issues:
+                    if (issue.section_title == h2_title or 
+                        issue.section_title == f"{h1_title} {h2_title}" or
+                        h2_title in issue.section_title or
+                        issue.section_title in h2_title):
+                        suggestion = issue.suggestion or issue.description or "论点一致性分析完成"
+                        found_issue = True
+                        break
                 
-                # 获取修正后的内容
-                regenerated_content = section_data.get('content', original_section_content)
+                # 然后查找regenerated_sections中的内容
+                for section_title, section_info in regenerated_sections.items():
+                    if (section_title == h2_title or 
+                        h2_title in section_title or 
+                        section_title in h2_title):
+                        section_data = section_info
+                        regenerated_content = section_data.get('content', original_section_content)
+                        
+                        # 如果没有找到一致性问题，但内容有变化，说明有修正
+                        if not found_issue and original_section_content != regenerated_content:
+                            suggestion = "内容已根据论点一致性要求进行优化"
+                            found_issue = True
+                        break
                 
-                # 获取建议
-                suggestion = issue.suggestion or "论点一致性分析完成"
+                # 如果既没有一致性问题，也没有内容变化，跳过该章节
+                if not found_issue:
+                    continue
                 
+                # 只有有一致性问题或内容变化的章节才包含在输出中
                 # 计算字数
-                word_count = section_data.get('word_count', len(regenerated_content.replace(' ', '').replace('\n', '')))
+                word_count = section_data.get('word_count', len(regenerated_content.replace(' ', '').replace('\n', ''))) if section_data else len(regenerated_content.replace(' ', '').replace('\n', ''))
                 
-                unified_sections[section_title] = SectionResult(
-                    section_title=section_title,
-                    original_content=original_section_content,
-                    suggestion=suggestion,
-                    regenerated_content=regenerated_content,
-                    word_count=word_count,
-                    status="success"
-                )
-        
-        # 处理没有一致性问题的章节（保持原样）
-        for section_title, original_section_content in original_sections.items():
-            if section_title not in unified_sections:
-                # 计算字数
-                word_count = len(original_section_content.replace(' ', '').replace('\n', ''))
+                # 确保一级标题存在
+                if h1_title not in unified_sections:
+                    unified_sections[h1_title] = {}
                 
-                unified_sections[section_title] = SectionResult(
-                    section_title=section_title,
-                    original_content=original_section_content,
-                    suggestion="论点一致性良好，无需修改",
-                    regenerated_content=original_section_content,
-                    word_count=word_count,
-                    status="success"
-                )
+                unified_sections[h1_title][h2_title] = {
+                    "original_content": original_section_content,
+                    "suggestion": suggestion,
+                    "regenerated_content": regenerated_content,
+                    "word_count": word_count,
+                    "status": "success"
+                }
     else:
         # 如果没有regenerated_sections，使用原来的逻辑
-        # 解析修正后内容的章节
-        corrected_sections = parse_sections(corrected_content) if corrected_content else original_sections
+        # 解析修正后内容的层级章节
+        corrected_hierarchy = parse_hierarchical_sections(corrected_content) if corrected_content else original_hierarchy
         
-        # 为每个章节生成结果
-        for section_title, original_section_content in original_sections.items():
-            corrected_section_content = corrected_sections.get(section_title, original_section_content)
+        # 为每个一级标题生成结果
+        for h1_title, h2_sections in original_hierarchy.items():
+            unified_sections[h1_title] = {}
             
-            # 查找该章节的一致性问题和建议
-            suggestion = ""
-            for issue in consistency_issues:
-                if issue.section_title == section_title:
-                    if suggestion:
-                        suggestion += "; " + issue.suggestion
+            # 为每个二级标题生成结果
+            for h2_title, original_section_content in h2_sections.items():
+                corrected_section_content = corrected_hierarchy.get(h1_title, {}).get(h2_title, original_section_content)
+                
+                # 查找该章节的一致性问题和建议
+                suggestion = ""
+                for issue in consistency_issues:
+                    if (issue.section_title == h2_title or 
+                        issue.section_title == f"{h1_title} {h2_title}" or
+                        h2_title in issue.section_title or
+                        issue.section_title in h2_title):
+                        if suggestion:
+                            suggestion += "; " + issue.suggestion
+                        else:
+                            suggestion = issue.suggestion
+                
+                if not suggestion:
+                    if original_section_content != corrected_section_content:
+                        suggestion = "论点一致性已优化"
                     else:
-                        suggestion = issue.suggestion
-            
-            if not suggestion:
-                suggestion = "论点一致性良好，无需修改"
-            
-            # 计算字数
-            word_count = len(corrected_section_content.replace(' ', '').replace('\n', ''))
-            
-            unified_sections[section_title] = SectionResult(
-                section_title=section_title,
-                original_content=original_section_content,
-                suggestion=suggestion,
-                regenerated_content=corrected_section_content,
-                word_count=word_count,
-                status="success"
-            )
+                        # 跳过无需修改的章节，不包含在输出中
+                        continue
+                
+                # 只有有一致性问题或内容变化的章节才包含在输出中
+                # 计算字数
+                word_count = len(corrected_section_content.replace(' ', '').replace('\n', ''))
+                
+                # 确保一级标题存在
+                if h1_title not in unified_sections:
+                    unified_sections[h1_title] = {}
+                
+                unified_sections[h1_title][h2_title] = {
+                    "original_content": original_section_content,
+                    "suggestion": suggestion,
+                    "regenerated_content": corrected_section_content,
+                    "word_count": word_count,
+                    "status": "success"
+                }
     
     return unified_sections
 
+
+def parse_hierarchical_sections(content: str) -> Dict[str, Dict[str, str]]:
+    """解析Markdown内容的层级章节结构"""
+    hierarchy = {}
+    lines = content.split('\n')
+    
+    current_h1 = None
+    current_h2 = None
+    current_content = []
+    
+    for line in lines:
+        line_stripped = line.strip()
+        
+        # 检测一级标题 (# 标题)
+        if line_stripped.startswith('# ') and not line_stripped.startswith('## '):
+            # 保存之前的二级标题内容
+            if current_h1 and current_h2:
+                if current_h1 not in hierarchy:
+                    hierarchy[current_h1] = {}
+                hierarchy[current_h1][current_h2] = '\n'.join(current_content).strip()
+            
+            # 开始新的一级标题
+            current_h1 = line_stripped[2:].strip()
+            current_h2 = None
+            current_content = []
+            
+        # 检测二级标题 (## 标题)
+        elif line_stripped.startswith('## '):
+            # 保存之前的二级标题内容
+            if current_h1 and current_h2:
+                if current_h1 not in hierarchy:
+                    hierarchy[current_h1] = {}
+                hierarchy[current_h1][current_h2] = '\n'.join(current_content).strip()
+            
+            # 开始新的二级标题
+            if current_h1:  # 确保有一级标题
+                current_h2 = line_stripped[3:].strip()
+                current_content = [line]  # 包含标题行
+            else:
+                # 如果没有一级标题，创建默认的
+                current_h1 = "文档内容"
+                current_h2 = line_stripped[3:].strip()
+                current_content = [line]
+                
+        else:
+            # 普通内容行
+            if current_h1 and current_h2:
+                current_content.append(line)
+            elif current_h1 and not current_h2:
+                # 一级标题下没有二级标题的内容，跳过空行，等待二级标题
+                if line.strip():  # 只有非空行才创建默认二级标题
+                    current_h2 = "概述"
+                    current_content = [line]
+    
+    # 保存最后一个章节
+    if current_h1 and current_h2:
+        if current_h1 not in hierarchy:
+            hierarchy[current_h1] = {}
+        hierarchy[current_h1][current_h2] = '\n'.join(current_content).strip()
+    
+    return hierarchy
 
 def parse_sections(content: str) -> Dict[str, str]:
     """解析Markdown内容的章节"""
@@ -850,12 +946,19 @@ async def process_pipeline_async(task_id: str, request: PipelineRequest):
             sections_corrected = len(regenerated_sections)
             
             # 生成完整文档
+            logger.info(f"开始生成完整文档，regenerated_sections数量: {len(regenerated_sections)}")
             corrected_document = regenerator._generate_complete_document(
                 request.document_content,
                 {},
                 regenerated_sections,
                 thesis_data
             )
+            logger.info(f"生成的完整文档长度: {len(corrected_document) if corrected_document else 0}")
+            
+            # 如果corrected_document为空，使用原始文档内容
+            if not corrected_document:
+                logger.warning("corrected_document为空，使用原始文档内容")
+                corrected_document = request.document_content
         
         # 生成统一格式的章节结果
         unified_sections = generate_unified_sections(
@@ -869,22 +972,35 @@ async def process_pipeline_async(task_id: str, request: PipelineRequest):
         if unified_sections:
             logger.info(f"unified_sections的键: {list(unified_sections.keys())}")
         
-        # 构建结果
-        try:
-            unified_sections_dict = {k: v.dict() for k, v in unified_sections.items()} if unified_sections else {}
-            logger.info(f"转换后的unified_sections_dict数量: {len(unified_sections_dict)}")
-        except Exception as e:
-            logger.error(f"转换unified_sections时出错: {e}")
-            unified_sections_dict = {}
+        # 构建结果 - unified_sections已经是字典格式，无需转换
+        unified_sections_dict = unified_sections if unified_sections else {}
+        logger.info(f"unified_sections_dict数量: {len(unified_sections_dict)}")
         
+        # 生成两个输出文件
+        import os
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        
+        # 1. 生成thesis_agent_unified JSON文件
+        results_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "router", "test_results")
+        unified_sections_file = os.path.join(results_dir, f"thesis_agent_unified_{task_id}_{timestamp}.json")
+        os.makedirs(results_dir, exist_ok=True)
+        with open(unified_sections_file, 'w', encoding='utf-8') as f:
+            json.dump(unified_sections_dict, f, ensure_ascii=False, indent=2)
+        
+        # 2. 生成thesis_optimized markdown文件
+        corrected_md_file = os.path.join(results_dir, f"thesis_optimized_{task_id}_{timestamp}.md")
+        with open(corrected_md_file, 'w', encoding='utf-8') as f:
+            f.write(corrected_document or request.document_content)
+        
+        # 构建简化的结果 - 只返回文件路径和基本信息
         result = {
-            "status": "success",
-            "document_title": document_title,
-            "thesis_statement": convert_thesis_statement(thesis_statement).dict(),
-            "consistency_analysis": convert_consistency_analysis(consistency_analysis).dict(),
-            "corrected_document": corrected_document,
-            "sections_corrected": sections_corrected,
-            "unified_sections": unified_sections_dict
+            "unified_sections_file": unified_sections_file,
+            "optimized_content_file": corrected_md_file,
+            "processing_time": (datetime.now() - start_time).total_seconds(),
+            "sections_count": len(unified_sections_dict),
+            "service_type": "thesis_agent",
+            "message": f"已生成2个文件: {os.path.basename(unified_sections_file)}, {os.path.basename(corrected_md_file)}",
+            "timestamp": timestamp  # 传递时间戳给Router
         }
         
         update_task_status(task_id, "completed", 100.0, "流水线处理完成", result)

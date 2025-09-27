@@ -999,6 +999,217 @@ class EvidencePipelineRequest(BaseModel):
     max_claims: int = Field(default=7, description="最大论断数量")
     max_search_results: int = Field(default=10, description="最大搜索结果数")
 
+async def process_evidence_pipeline_async(
+    task_id: str,
+    document_content: str,
+    document_title: str,
+    max_claims: int,
+    max_search_results: int
+):
+    """异步处理证据增强流水线"""
+    try:
+        update_task_status(task_id, "running", 10.0, "开始证据分析")
+        
+        # 使用现有的pipeline处理文档
+        await initialize_pipeline()
+        if not pipeline:
+            raise Exception("系统未初始化")
+        
+        # 创建临时文件
+        import tempfile
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.md', delete=False, encoding='utf-8') as temp_file:
+            temp_file.write(document_content)
+            temp_file_path = temp_file.name
+        
+        try:
+            update_task_status(task_id, "running", 30.0, "检测论断")
+            
+            # 使用pipeline处理文档
+            result = pipeline.process_whole_document(
+                document_path=temp_file_path,
+                max_claims=max_claims,
+                max_search_results=max_search_results,
+                use_section_based_processing=True
+            )
+            
+            update_task_status(task_id, "running", 80.0, "生成统一格式输出")
+            
+            # 生成时间戳
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
+            
+            # 确保test_results目录存在
+            results_dir = Path("/Users/wangzijian/Desktop/gauz/keyan/review_agent_save/router/test_results")
+            results_dir.mkdir(exist_ok=True)
+            
+            # 生成文件名
+            unified_sections_file = results_dir / f"web_agent_unified_{task_id}_{timestamp}.json"
+            enhanced_md_file = results_dir / f"web_enhanced_{task_id}_{timestamp}.md"
+            
+            if result['status'] == 'success':
+                # 生成unified_sections格式的数据
+                unified_sections = generate_unified_sections_from_result(result, document_content)
+                
+                # 保存unified_sections文件
+                with open(unified_sections_file, 'w', encoding='utf-8') as f:
+                    json.dump(unified_sections, f, ensure_ascii=False, indent=2)
+                
+                # 生成增强后的文档内容
+                enhanced_content = generate_enhanced_content_from_result(result, document_content)
+                
+                # 保存增强后的markdown文件
+                with open(enhanced_md_file, 'w', encoding='utf-8') as f:
+                    f.write(enhanced_content)
+                
+                # 构建结果
+                final_result = {
+                    "unified_sections_file": str(unified_sections_file),
+                    "enhanced_content_file": str(enhanced_md_file),
+                    "processing_time": result.get('processing_time', 0),
+                    "sections_count": len(unified_sections),
+                    "service_type": "web_agent",
+                    "message": f"已生成2个文件: {unified_sections_file.name}, {enhanced_md_file.name}",
+                    "timestamp": timestamp
+                }
+                
+                update_task_status(task_id, "completed", 100.0, "处理完成", final_result)
+            else:
+                raise Exception(result.get('error', '处理失败'))
+                
+        finally:
+            # 清理临时文件
+            import os
+            if os.path.exists(temp_file_path):
+                os.unlink(temp_file_path)
+                
+    except Exception as e:
+        logger.error(f"异步任务处理失败: {e}")
+        update_task_status(task_id, "failed", 0.0, "处理失败", error=str(e))
+
+def generate_unified_sections_from_result(result: Dict, original_content: str) -> Dict:
+    """从pipeline结果生成unified_sections格式的数据"""
+    # 解析文档结构
+    sections = extract_document_sections(original_content)
+    unified_sections = {}
+    
+    # 从result中读取实际的evidence_analysis文件
+    evidence_analysis_data = []
+    evidence_results_data = []
+    
+    if 'output_files' in result and 'evidence_analysis' in result['output_files']:
+        evidence_file_path = result['output_files']['evidence_analysis']
+        try:
+            with open(evidence_file_path, 'r', encoding='utf-8') as f:
+                evidence_data = json.load(f)
+                evidence_analysis_data = evidence_data.get('unsupported_claims', [])
+                evidence_results_data = evidence_data.get('evidence_results', [])
+                print(f"✅ 读取evidence文件: {len(evidence_analysis_data)} 个论断, {len(evidence_results_data)} 个证据结果")
+        except Exception as e:
+            print(f"❌ 读取evidence_analysis文件失败: {e}")
+    
+    # 如果没有从文件读取到数据，尝试从result直接获取
+    if not evidence_analysis_data:
+        evidence_analysis_data = result.get('evidence_analysis', [])
+        # 如果evidence_analysis是字典格式，提取unsupported_claims
+        if isinstance(evidence_analysis_data, dict):
+            evidence_analysis_data = evidence_analysis_data.get('unsupported_claims', [])
+    
+    print(f"🔍 找到 {len(evidence_analysis_data)} 个论断进行分析")
+    
+    for h1_title, h2_sections in sections.items():
+        unified_sections[h1_title] = {}
+        
+        for h2_title, section_content in h2_sections.items():
+            # 查找该章节的论断
+            section_claims = []
+            for claim in evidence_analysis_data:
+                if isinstance(claim, dict):
+                    section_title = claim.get('section_title', '')
+                else:
+                    section_title = getattr(claim, 'section_title', '')
+                
+                if (section_title == h2_title or 
+                    section_title == f"{h1_title} {h2_title}" or
+                    h2_title in section_title or
+                    section_title == h1_title):
+                    section_claims.append(claim)
+            
+            if section_claims:
+                # 查找对应的证据结果
+                total_evidence_count = 0
+                enhanced_content = section_content
+                suggestions = []
+                
+                for claim in section_claims:
+                    claim_id = claim.get('claim_id') if isinstance(claim, dict) else getattr(claim, 'claim_id', '')
+                    
+                    # 在evidence_results中查找对应的证据
+                    for evidence_result in evidence_results_data:
+                        if isinstance(evidence_result, dict):
+                            result_claim_id = evidence_result.get('claim_id', '')
+                            evidence_sources = evidence_result.get('evidence_sources', [])
+                            enhanced_text = evidence_result.get('enhanced_text', '')
+                        else:
+                            result_claim_id = getattr(evidence_result, 'claim_id', '')
+                            evidence_sources = getattr(evidence_result, 'evidence_sources', [])
+                            enhanced_text = getattr(evidence_result, 'enhanced_text', '')
+                        
+                        if result_claim_id == claim_id:
+                            total_evidence_count += len(evidence_sources)
+                            claim_text = claim.get('claim_text') if isinstance(claim, dict) else getattr(claim, 'claim_text', '')
+                            
+                            if len(evidence_sources) > 0:
+                                suggestions.append(f"论断「{claim_text}」找到 {len(evidence_sources)} 个证据支持")
+                            else:
+                                suggestions.append(f"论断「{claim_text}」未找到充分证据支持")
+                
+                # 生成增强内容：从enhanced_document中提取对应章节
+                if 'output_files' in result and 'enhanced_document' in result['output_files']:
+                    try:
+                        enhanced_file_path = result['output_files']['enhanced_document']
+                        with open(enhanced_file_path, 'r', encoding='utf-8') as f:
+                            enhanced_doc = f.read()
+                            # 尝试提取对应章节的增强内容
+                            import re
+                            pattern = rf"## {re.escape(h2_title)}(.*?)(?=##|\Z)"
+                            match = re.search(pattern, enhanced_doc, re.DOTALL)
+                            if match:
+                                enhanced_section = match.group(1).strip()
+                                if enhanced_section and enhanced_section != section_content:
+                                    enhanced_content = enhanced_section
+                    except Exception as e:
+                        print(f"❌ 提取增强章节内容失败: {e}")
+                
+                suggestion = "; ".join(suggestions) if suggestions else f"发现 {len(section_claims)} 个论断，找到 {total_evidence_count} 个证据支持"
+                
+                unified_sections[h1_title][h2_title] = {
+                    "original_content": section_content,
+                    "suggestion": suggestion,
+                    "regenerated_content": enhanced_content,
+                    "word_count": len(section_content),
+                    "status": "enhanced" if total_evidence_count > 0 else "identified"
+                }
+                
+                print(f"✅ 章节 {h2_title}: {len(section_claims)} 个论断, {total_evidence_count} 个证据")
+    
+    print(f"📊 生成unified_sections: {len(unified_sections)} 个H1标题")
+    return unified_sections
+
+def generate_enhanced_content_from_result(result: Dict, original_content: str) -> str:
+    """从pipeline结果生成增强后的文档内容"""
+    # 从result中读取实际的enhanced_document文件
+    if 'output_files' in result and 'enhanced_document' in result['output_files']:
+        enhanced_file_path = result['output_files']['enhanced_document']
+        try:
+            with open(enhanced_file_path, 'r', encoding='utf-8') as f:
+                enhanced_content = f.read()
+                print(f"✅ 成功读取增强文档: {len(enhanced_content)} 字符")
+                return enhanced_content
+        except Exception as e:
+            print(f"❌ 读取增强文档失败: {e}")
+    
+    print("⚠️ 未找到增强文档，使用原始内容")
+    return original_content
+
 @router.post("/v1/evidence-pipeline-async")
 async def evidence_pipeline_async(
     background_tasks: BackgroundTasks,
@@ -1055,10 +1266,21 @@ async def get_evidence_result(task_id: str):
     if task_info["status"] != "completed":
         raise HTTPException(status_code=400, detail="任务尚未完成")
     
-    if not task_info.get("result"):
-        raise HTTPException(status_code=404, detail="结果不存在")
-    
-    return task_info["result"]
+    # 从结果中获取unified_sections文件路径并读取内容
+    result = task_info.get("result", {})
+    if isinstance(result, dict) and "unified_sections_file" in result:
+        unified_sections_file = result["unified_sections_file"]
+        
+        try:
+            with open(unified_sections_file, 'r', encoding='utf-8') as f:
+                unified_sections_data = json.load(f)
+            return unified_sections_data
+        except FileNotFoundError:
+            raise HTTPException(status_code=404, detail="unified_sections文件不存在")
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"读取文件失败: {str(e)}")
+    else:
+        raise HTTPException(status_code=404, detail="未找到unified_sections文件")
 
 @router.get("/v1/enhanced/{task_id}")
 async def get_enhanced_document(task_id: str):
@@ -1070,277 +1292,23 @@ async def get_enhanced_document(task_id: str):
     if task_info["status"] != "completed":
         raise HTTPException(status_code=400, detail="任务尚未完成")
     
-    # 从保存的文件中读取增强后的文档
-    result_dir = Path(__file__).parent.parent / "test_results"
-    timestamp = task_info.get("timestamp", "")
-    enhanced_file = result_dir / f"web_enhanced_{task_id}_{timestamp}.md"
-    
-    if not enhanced_file.exists():
-        raise HTTPException(status_code=404, detail="增强文档不存在")
-    
-    try:
-        with open(enhanced_file, 'r', encoding='utf-8') as f:
-            content = f.read()
-        return {"enhanced_document": content}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"读取文档失败: {str(e)}")
+    # 从结果中获取enhanced_content文件路径并读取内容
+    result = task_info.get("result", {})
+    if isinstance(result, dict) and "enhanced_content_file" in result:
+        enhanced_content_file = result["enhanced_content_file"]
+        
+        try:
+            with open(enhanced_content_file, 'r', encoding='utf-8') as f:
+                content = f.read()
+            return {"enhanced_document": content}
+        except FileNotFoundError:
+            raise HTTPException(status_code=404, detail="增强文档不存在")
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"读取文件失败: {str(e)}")
+    else:
+        raise HTTPException(status_code=404, detail="未找到enhanced_content文件")
 
 # =============================================================================
 # 后台处理函数
 # =============================================================================
 
-async def process_evidence_pipeline_async(
-    task_id: str,
-    document_content: str,
-    document_title: str,
-    max_claims: int,
-    max_search_results: int
-):
-    """异步处理证据增强流水线"""
-    global _task_storage
-    import time
-    start_time = time.time()
-    
-    try:
-        update_task_status(task_id, "running", 10.0, "开始检测缺乏证据支撑的论断...")
-        
-        # 提取文档章节
-        sections = extract_document_sections(document_content)
-        
-        unified_claims = {}
-        all_claims = []
-        claim_to_location = {}  # 记录每个claim索引的位置信息
-        
-        update_task_status(task_id, "running", 20.0, "分析文档章节并收集论断...")
-        
-        # 第一阶段：收集所有论断（不搜索证据）
-        section_count = 0
-        total_sections = sum(len(h2_sections) for h2_sections in sections.values())
-        
-        for h1_title, h2_sections in sections.items():
-            unified_claims[h1_title] = {}
-            
-            for h2_title, section_content in h2_sections.items():
-                section_count += 1
-                progress = 20.0 + (section_count / total_sections) * 30.0
-                update_task_status(task_id, "running", progress, f"收集论断: {h2_title}")
-                
-                # 使用evidence_detector检测论断
-                unsupported_claims = pipeline.evidence_detector._detect_unsupported_claims(h2_title, section_content)
-                
-                # 限制每个章节的claim数量
-                if len(unsupported_claims) > max_claims:
-                    unsupported_claims = sorted(unsupported_claims, key=lambda x: x.confidence_level, reverse=True)[:max_claims]
-                
-                # 全局限制：总共不超过7个claims
-                current_total_claims = len(all_claims)
-                remaining_slots = 7 - current_total_claims
-                if remaining_slots <= 0:
-                    break  # 已达到最大claim数量，跳出章节循环
-                elif len(unsupported_claims) > remaining_slots:
-                    unsupported_claims = unsupported_claims[:remaining_slots]
-                
-                # 收集claims并记录位置
-                section_claims = {}
-                for i, claim in enumerate(unsupported_claims):
-                    claim_id = f"{h2_title}_claim_{i+1}"
-                    claim_index = len(all_claims)  # 使用索引作为键
-                    claim_to_location[claim_index] = (h1_title, h2_title, claim_id)
-                    all_claims.append(claim)
-                    
-                    # 先创建基本结构
-                    section_claims[claim_id] = {
-                        "original_content": claim.claim_text,
-                        "regenerated_content": claim.claim_text,  # 稍后更新
-                        "suggestion": "正在搜索证据...",
-                        "word_count": len(claim.claim_text),
-                        "status": "processing"
-                    }
-                
-                unified_claims[h1_title][h2_title] = section_claims
-                
-                # 如果已达到7个claims，停止收集
-                if len(all_claims) >= 7:
-                    break
-            
-            if len(all_claims) >= 7:
-                break
-        
-        # 第二阶段：并行搜索所有论断的证据
-        if all_claims:
-            update_task_status(task_id, "running", 50.0, f"并行搜索 {len(all_claims)} 个论断的证据...")
-            print(f"🔍 开始并行搜索 {len(all_claims)} 个论断的证据...")
-            
-            # 使用并行搜索
-            evidence_results = pipeline.evidence_detector._batch_search_evidence(all_claims)
-            
-            # 第三阶段：更新结果
-            update_task_status(task_id, "running", 80.0, "生成增强内容...")
-            
-            for claim_index, (claim, evidence) in enumerate(zip(all_claims, evidence_results)):
-                h1_title, h2_title, claim_id = claim_to_location[claim_index]
-                
-                # 生成证据增强的内容
-                try:
-                    if evidence.evidence_sources and evidence.processing_status == 'success':
-                        enhanced_claim = _enhance_claim_with_evidence(claim.claim_text, evidence.evidence_sources)
-                        suggestion = f"已为该论断补充 {len(evidence.evidence_sources)} 条证据支撑"
-                        status = "enhanced"
-                    else:
-                        enhanced_claim = claim.claim_text
-                        suggestion = "未找到足够的证据支撑，建议进一步验证"
-                        status = "no_evidence"
-                    
-                    # 更新unified_claims中的数据
-                    unified_claims[h1_title][h2_title][claim_id] = {
-                        "original_content": claim.claim_text,
-                        "regenerated_content": enhanced_claim,
-                        "suggestion": suggestion,
-                        "word_count": len(enhanced_claim),
-                        "status": status
-                    }
-                except Exception as e:
-                    print(f"    ❌ 处理论断 {claim_id} 时出错: {str(e)}")
-                    # 保持原始内容
-                    unified_claims[h1_title][h2_title][claim_id] = {
-                        "original_content": claim.claim_text,
-                        "regenerated_content": claim.claim_text,
-                        "suggestion": f"处理时出错: {str(e)}",
-                        "word_count": len(claim.claim_text),
-                        "status": "error"
-                    }
-        
-        update_task_status(task_id, "running", 80.0, "生成增强文档...")
-        
-        # 生成增强后的markdown文档
-        enhanced_document = _generate_markdown_from_claims(unified_claims, document_content)
-        
-        # 保存结果文件
-        update_task_status(task_id, "running", 90.0, "保存结果文件...")
-        
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        result_dir = Path(__file__).parent.parent / "test_results"
-        result_dir.mkdir(exist_ok=True)
-        
-        # 保存JSON结果
-        claims_file = result_dir / f"web_claims_{task_id}_{timestamp}.json"
-        with open(claims_file, 'w', encoding='utf-8') as f:
-            json.dump(unified_claims, f, ensure_ascii=False, indent=2)
-        
-        # 保存增强文档
-        enhanced_file = result_dir / f"web_enhanced_{task_id}_{timestamp}.md"
-        with open(enhanced_file, 'w', encoding='utf-8') as f:
-            f.write(enhanced_document)
-        
-        processing_time = time.time() - start_time
-        
-        # 统计信息
-        total_claims_found = sum(len(h2_claims) for h1_claims in unified_claims.values() for h2_claims in h1_claims.values())
-        enhanced_claims = sum(1 for h1_claims in unified_claims.values() 
-                            for h2_claims in h1_claims.values() 
-                            for claim_data in h2_claims.values() 
-                            if claim_data.get('status') == 'enhanced')
-        
-        statistics = {
-            "total_sections_processed": total_sections,
-            "total_claims_found": total_claims_found,
-            "enhanced_claims": enhanced_claims,
-            "evidence_sources_found": sum(len(claim_data.get('evidence_sources', [])) 
-                                        for h1_claims in unified_claims.values() 
-                                        for h2_claims in h1_claims.values() 
-                                        for claim_data in h2_claims.values()),
-            "processing_time": processing_time
-        }
-        
-        # 更新任务状态为完成
-        update_task_status(
-            task_id, 
-            "completed", 
-            100.0, 
-            "证据增强流水线处理完成",
-            result=unified_claims,
-            error=None
-        )
-        
-        # 添加时间戳到任务信息中
-        _task_storage[task_id]["timestamp"] = timestamp
-        _task_storage[task_id]["statistics"] = statistics
-        
-        print(f"✅ 证据增强任务 {task_id} 完成，耗时 {processing_time:.1f}秒")
-        
-    except Exception as e:
-        processing_time = time.time() - start_time
-        error_msg = f"证据增强处理异常: {str(e)}"
-        print(f"❌ 任务 {task_id} 失败: {error_msg}")
-        traceback.print_exc()
-        
-        update_task_status(
-            task_id,
-            "failed",
-            0.0,
-            "证据增强处理失败",
-            result=None,
-            error=error_msg
-        )
-
-async def process_document_background(
-    task_id: str,
-    document_path: str,
-    max_claims: int,
-    max_search_results: int,
-    use_section_based_processing: bool = False
-):
-    """后台处理文档的函数"""
-    try:
-        processing_tasks[task_id]["progress"] = "正在检测论断..."
-        
-        result = pipeline.process_whole_document(
-            document_path=document_path,
-            max_claims=max_claims,
-            max_search_results=max_search_results,
-            use_section_based_processing=use_section_based_processing
-        )
-        
-        if result['status'] == 'success':
-            processing_tasks[task_id].update({
-                "status": "completed",
-                "progress": "处理完成",
-                "completed_at": datetime.now().isoformat(),
-                "result": DocumentProcessResponse(
-                    task_id=task_id,
-                    status="completed",
-                    message="文档处理成功完成",
-                    processing_time=result['processing_time'],
-                    statistics=result['statistics'],
-                    output_files=result['output_files']
-                )
-            })
-        else:
-            processing_tasks[task_id].update({
-                "status": "failed",
-                "progress": "处理失败",
-                "completed_at": datetime.now().isoformat(),
-                "result": DocumentProcessResponse(
-                    task_id=task_id,
-                    status="failed",
-                    message="文档处理失败",
-                    error=result.get('error', '未知错误')
-                )
-            })
-    
-    except Exception as e:
-        error_msg = f"处理过程中出现异常: {str(e)}"
-        print(f"❌ 任务 {task_id} 处理失败: {error_msg}")
-        traceback.print_exc()
-        
-        processing_tasks[task_id].update({
-            "status": "failed",
-            "progress": "处理异常",
-            "completed_at": datetime.now().isoformat(),
-            "result": DocumentProcessResponse(
-                task_id=task_id,
-                status="failed",
-                message="文档处理异常",
-                error=error_msg
-            )
-        })

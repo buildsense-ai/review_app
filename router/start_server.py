@@ -33,7 +33,7 @@ def main():
     uvicorn.run(
         "main:app",
         host="0.0.0.0",
-        port=8000,
+        port=8010,
         reload=True,
         log_level=config.log_level.lower(),
         access_log=True

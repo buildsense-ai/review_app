@@ -340,6 +340,71 @@ async def list_tasks():
             detail=f"列出任务失败: {str(e)}"
         )
 
+@router.get("/tasks/{task_id}/unified-sections", summary="获取统一章节结果")
+async def get_unified_sections(task_id: str):
+    """
+    获取任务的统一章节结果（unified_sections格式）
+    
+    - **task_id**: 任务ID
+    
+    返回处理后的章节结果，格式为嵌套的章节结构
+    """
+    if not task_manager:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="任务管理器未初始化"
+        )
+    
+    try:
+        task_info = task_manager.get_task_status(task_id)
+        
+        if not task_info:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"任务不存在: {task_id}"
+            )
+        
+        if task_info.status != TaskStatus.COMPLETED:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="任务尚未完成"
+            )
+        
+        # 从结果中获取unified_sections文件路径并读取内容
+        result = task_info.result
+        if result and "unified_sections_file" in result:
+            unified_sections_file = result["unified_sections_file"]
+            
+            try:
+                import json
+                with open(unified_sections_file, 'r', encoding='utf-8') as f:
+                    unified_sections_data = json.load(f)
+                return unified_sections_data
+            except FileNotFoundError:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="unified_sections文件不存在"
+                )
+            except Exception as e:
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail=f"读取文件失败: {str(e)}"
+                )
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="未找到unified_sections文件"
+            )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ 获取统一章节结果失败: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"获取统一章节结果失败: {str(e)}"
+        )
+
 @router.post("/tasks/cleanup", summary="清理过期任务")
 async def cleanup_tasks(max_age_hours: int = 24):
     """

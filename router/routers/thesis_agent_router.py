@@ -202,10 +202,20 @@ async def process_pipeline_async(task_id: str, request: PipelineRequest):
         if thesis_agent_path not in sys.path:
             sys.path.insert(0, thesis_agent_path)
         
-        # 导入thesis agent的核心模块
-        from thesis_extractor import ThesisExtractor
-        from thesis_consistency_checker import ThesisConsistencyChecker
-        from document_regenerator import ThesisDocumentRegenerator
+        # 确保config模块能被正确导入
+        import sys
+        original_path = sys.path.copy()
+        
+        try:
+            # 导入thesis agent的核心模块
+            from thesis_extractor import ThesisExtractor
+            from thesis_consistency_checker import ThesisConsistencyChecker
+            from document_regenerator import ThesisDocumentRegenerator
+        except ImportError as e:
+            logger.error(f"导入thesis_agent模块失败: {e}")
+            # 恢复原始路径
+            sys.path = original_path
+            raise HTTPException(status_code=500, detail=f"导入thesis_agent模块失败: {str(e)}")
         
         # 设置默认标题
         document_title = request.document_title or "未命名文档"

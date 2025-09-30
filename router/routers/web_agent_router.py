@@ -1037,8 +1037,8 @@ async def process_evidence_pipeline_async(
             # 生成时间戳
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
             
-            # 确保test_results目录存在
-            results_dir = Path("/Users/wangzijian/Desktop/gauz/keyan/review_agent_save/router/test_results")
+            # 确保test_results目录存在 (使用相对路径)
+            results_dir = Path(__file__).parent.parent / "test_results"
             results_dir.mkdir(exist_ok=True)
             
             # 生成文件名

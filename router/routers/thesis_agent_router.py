@@ -194,6 +194,10 @@ async def async_pipeline(request: PipelineRequest, background_tasks: BackgroundT
 
 async def process_pipeline_async(task_id: str, request: PipelineRequest):
     """异步处理流水线任务"""
+    
+    # 提前导入sys，避免作用域问题
+    import sys
+
     try:
         update_task_status(task_id, "running", 10.0, "开始论点一致性检查")
         
@@ -203,7 +207,6 @@ async def process_pipeline_async(task_id: str, request: PipelineRequest):
             sys.path.insert(0, thesis_agent_path)
         
         # 确保config模块能被正确导入
-        import sys
         original_path = sys.path.copy()
         
         try:
@@ -304,8 +307,8 @@ async def process_pipeline_async(task_id: str, request: PipelineRequest):
         # 生成唯一时间戳（包含毫秒，确保唯一性）
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
         
-        # 确保test_results目录存在
-        results_dir = Path("/Users/wangzijian/Desktop/gauz/keyan/review_agent_save/router/test_results")
+        # 确保test_results目录存在 (使用相对路径)
+        results_dir = Path(__file__).parent.parent / "test_results"
         results_dir.mkdir(exist_ok=True)
         
         # 生成唯一文件名
@@ -347,6 +350,9 @@ async def process_pipeline_async(task_id: str, request: PipelineRequest):
         
     except Exception as e:
         logger.error(f"异步任务处理失败: {e}")
+        # 确保在异常时恢复sys.path
+        if 'original_path' in locals():
+            sys.path = original_path
         update_task_status(task_id, "failed", 0.0, "处理失败", error=str(e))
 
 # 已删除generate_optimized_markdown函数，直接使用AI生成的corrected_document

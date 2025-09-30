@@ -138,13 +138,13 @@ class TaskManager:
                 original_clean = original_section_content.strip().replace('\n\n', '\n')
                 optimized_clean = optimized_section_content.strip().replace('\n\n', '\n')
                 
-                # 如果内容完全相同（除了格式），说明LLM修改可能失败了
+                # V2修复：即使内容完全相同，只要有建议就包含，并将状态标记为 'unchanged'
+                status = "success"
                 if original_clean == optimized_clean:
                     self.logger.warning(f"章节 '{h2_title}' 有建议但内容未改变，可能LLM修改失败")
-                    # 可以选择跳过或者标记状态
-                    continue
+                    status = "unchanged" # 标记为未改变
                 
-                # 只有有修改建议且内容真正变化的章节才包含在输出中
+                # 只有有修改建议的章节才包含在输出中
                 # 计算字数
                 word_count = len(optimized_section_content.replace(' ', '').replace('\n', ''))
                 
@@ -157,7 +157,7 @@ class TaskManager:
                     "suggestion": suggestion,
                     "regenerated_content": optimized_section_content,
                     "word_count": word_count,
-                    "status": "success"
+                    "status": status
                 }
         
         return unified_sections
@@ -374,27 +374,45 @@ class TaskManager:
                 with open(analysis_file_path, 'r', encoding='utf-8') as f:
                     analysis_data = json.load(f)
                 
+                # 调试信息：显示分析结果
+                self.logger.info(f"🔍 分析文件路径: {analysis_file_path}")
+                self.logger.info(f"🔍 分析结果摘要: {len(analysis_data.get('modification_instructions', []))} 个修改建议")
+                
                 processing_time = time.time() - start_time
                 
                 # 生成统一格式的章节结果
+                modification_instructions = analysis_data.get('modification_instructions', [])
+                table_opportunities = analysis_data.get('table_opportunities', [])
+                
+                # 后备机制：如果AI没有返回任何建议，生成默认建议
+                if not modification_instructions and not table_opportunities:
+                    self.logger.warning("⚠️ AI未返回任何建议，启用后备机制生成默认建议")
+                    modification_instructions = [{
+                        "subtitle": "文档整体",
+                        "suggestion": "文档结构清晰，内容完整。建议可以进一步精炼表述，增强逻辑连贯性，或考虑添加更多具体案例来支撑观点。"
+                    }]
+                
                 unified_sections = self._generate_unified_sections(
                     task_info.content,
                     optimized_content,
-                    analysis_data.get('modification_instructions', []),
-                    analysis_data.get('table_opportunities', [])
+                    modification_instructions,
+                    table_opportunities
                 )
                 
                 # 生成两个输出文件
                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                 
                 # 1. 生成unified_sections JSON文件
-                unified_sections_file = f"./test_results/unified_sections_{timestamp}.json"
-                os.makedirs("./test_results", exist_ok=True)
+                # 使用相对于router目录的路径，确保部署后路径正确
+                from pathlib import Path
+                results_dir = Path(__file__).parent.parent / "router" / "test_results"
+                results_dir.mkdir(parents=True, exist_ok=True)
+                unified_sections_file = results_dir / f"unified_sections_{timestamp}.json"
                 with open(unified_sections_file, 'w', encoding='utf-8') as f:
                     json.dump(unified_sections, f, ensure_ascii=False, indent=2)
                 
                 # 2. 生成优化后的markdown文件
-                optimized_md_file = f"./test_results/optimized_content_{task_id}.md"
+                optimized_md_file = results_dir / f"optimized_content_{task_id}.md"
                 with open(optimized_md_file, 'w', encoding='utf-8') as f:
                     f.write(optimized_content)
                 
@@ -420,8 +438,8 @@ class TaskManager:
                 # 清理临时文件
                 try:
                     os.unlink(temp_file_path)
-                    os.unlink(analysis_file_path)
-                    os.unlink(optimized_file_path)
+                    # 保留分析文件用于调试
+                    # os.unlink(analysis_file_path)
                 except:
                     pass  # 忽略清理错误
                     

@@ -1001,13 +1001,14 @@ async def process_document_background(
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             
             # 1. 生成unified_sections JSON文件
-            unified_sections_file = f"./test_results/unified_sections_{timestamp}.json"
-            os.makedirs("./test_results", exist_ok=True)
+            results_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "router", "outputs", "web_evidence")
+            os.makedirs(results_dir, exist_ok=True)
+            unified_sections_file = os.path.join(results_dir, f"unified_sections_{timestamp}.json")
             with open(unified_sections_file, 'w', encoding='utf-8') as f:
                 json.dump(unified_sections, f, ensure_ascii=False, indent=2)
             
             # 2. 生成增强后的markdown文件
-            enhanced_md_file = f"./test_results/enhanced_content_{task_id}.md"
+            enhanced_md_file = os.path.join(results_dir, f"enhanced_content_{task_id}.md")
             with open(enhanced_md_file, 'w', encoding='utf-8') as f:
                 f.write(enhanced_content)
             

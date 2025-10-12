@@ -15,7 +15,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 # 导入路由器
-from routers.final_review_router import router as final_review_router
+from routers.redundancy_agent_router import router as redundancy_agent_router
+from routers.table_agent_router import router as table_agent_router
 from routers.thesis_agent_router import router as thesis_agent_router  
 from routers.web_agent_router import router as web_agent_router
 
@@ -76,8 +77,13 @@ async def global_exception_handler(request, exc):
 
 # 注册路由器
 app.include_router(
-    final_review_router,
-    prefix="/api/final-review"
+    redundancy_agent_router,
+    prefix="/api/redundancy-agent"
+)
+
+app.include_router(
+    table_agent_router,
+    prefix="/api/table-agent"
 )
 
 app.include_router(
@@ -97,12 +103,17 @@ async def root():
     return {
         "name": "统一AI服务路由系统",
         "version": "1.0.0",
-        "description": "整合文档优化、论点一致性检查、论据支持度评估三个AI服务",
+        "description": "整合冗余优化、表格优化、论点一致性检查、论据支持度评估四个AI服务",
         "services": {
-            "final_review": {
-                "name": "文档优化服务",
-                "prefix": "/api/final-review",
-                "description": "基于AI的智能文档质量分析和优化服务"
+            "redundancy_agent": {
+                "name": "冗余内容优化服务",
+                "prefix": "/api/redundancy-agent",
+                "description": "基于AI的文档冗余内容识别和优化服务"
+            },
+            "table_agent": {
+                "name": "表格优化服务",
+                "prefix": "/api/table-agent",
+                "description": "基于AI的文档表格化内容识别和优化服务"
             },
             "thesis_agent": {
                 "name": "论点一致性检查服务", 
@@ -125,7 +136,11 @@ async def health_check():
     try:
         # 检查环境变量和基础配置
         services_status = {
-            "final_review": {
+            "redundancy_agent": {
+                "status": "healthy" if os.getenv("OPENROUTER_API_KEY") else "degraded",
+                "api_available": bool(os.getenv("OPENROUTER_API_KEY"))
+            },
+            "table_agent": {
                 "status": "healthy" if os.getenv("OPENROUTER_API_KEY") else "degraded",
                 "api_available": bool(os.getenv("OPENROUTER_API_KEY"))
             },

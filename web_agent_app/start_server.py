@@ -47,10 +47,8 @@ def check_config():
     return True
 
 def create_output_dir():
-    """创建输出目录"""
-    output_dir = Path("test_results")
-    output_dir.mkdir(exist_ok=True)
-    print(f"✅ 输出目录已创建: {output_dir.absolute()}")
+    """创建输出目录（由统一路由管理，这里不再创建）"""
+    pass
 
 def main():
     """主函数"""

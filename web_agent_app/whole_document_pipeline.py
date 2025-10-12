@@ -68,7 +68,9 @@ class WholeDocumentPipeline:
         self.evidence_detector = EvidenceDetector()
         self.direct_merger = DirectDocumentMerger()
         self.web_search_agent = WebSearchAgent()
-        self.output_dir = "test_results"
+        # 统一输出到 router/outputs/web_evidence
+        from pathlib import Path
+        self.output_dir = str(Path(__file__).parent.parent / "router" / "outputs" / "web_evidence")
         
         # 并行处理配置
         self.max_workers = config.MAX_WORKERS

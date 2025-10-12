@@ -80,7 +80,10 @@ class ThesisAgentConfig:
     # 输出配置
     @property
     def default_output_dir(self) -> str:
-        return os.getenv('DEFAULT_OUTPUT_DIR', './test_results')
+        # 统一输出到 router/outputs/thesis
+        from pathlib import Path
+        router_outputs = Path(__file__).parent.parent / "router" / "outputs" / "thesis"
+        return str(router_outputs)
     
     @property
     def log_level(self) -> str:

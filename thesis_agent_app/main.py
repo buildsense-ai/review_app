@@ -62,9 +62,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# 创建临时文件目录
-TEMP_DIR = Path("./temp_files")
-TEMP_DIR.mkdir(exist_ok=True)
+# 临时文件目录（由统一路由管理）
+TEMP_DIR = Path(__file__).parent.parent / "router" / "temp_files"
 
 # 全局任务存储（生产环境建议使用Redis等）
 task_storage = {}
@@ -981,7 +980,7 @@ async def process_pipeline_async(task_id: str, request: PipelineRequest):
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         
         # 1. 生成thesis_agent_unified JSON文件
-        results_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "router", "test_results")
+        results_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "router", "outputs", "thesis")
         unified_sections_file = os.path.join(results_dir, f"thesis_agent_unified_{task_id}_{timestamp}.json")
         os.makedirs(results_dir, exist_ok=True)
         with open(unified_sections_file, 'w', encoding='utf-8') as f:

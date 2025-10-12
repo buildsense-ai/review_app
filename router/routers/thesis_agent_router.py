@@ -16,6 +16,13 @@ from datetime import datetime
 from pathlib import Path
 from pydantic import BaseModel
 
+# 添加shared到Python路径
+shared_path = Path(__file__).parent.parent.parent / "shared"
+sys.path.insert(0, str(shared_path))
+
+# 导入统一的任务管理器和文档解析器
+from shared import TaskManager, TaskStatus, DocumentParser
+
 # 设置日志
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -23,22 +30,16 @@ logger = logging.getLogger(__name__)
 # 创建路由器
 router = APIRouter(tags=["论点一致性检查"])
 
-# 任务存储
-task_storage: Dict[str, Dict] = {}
+# 使用统一的任务管理器
+task_manager = TaskManager()
 
 class PipelineRequest(BaseModel):
     document_content: str
     document_title: Optional[str] = None
     auto_correct: bool = True
 
-class TaskStatusResponse(BaseModel):
-    task_id: str
-    status: str
-    progress: float
-    message: str
-    result: Optional[Dict[str, Any]] = None
-    error: Optional[str] = None
-    updated_at: str
+# 任务状态响应模型从shared导入
+TaskStatusResponse = TaskStatus
 
 def create_task_id() -> str:
     """生成唯一任务ID"""
@@ -46,63 +47,12 @@ def create_task_id() -> str:
 
 def update_task_status(task_id: str, status: str, progress: float, message: str, 
                       result: Optional[Dict] = None, error: Optional[str] = None):
-    """更新任务状态"""
-    task_storage[task_id] = {
-        "task_id": task_id,
-        "status": status,
-        "progress": progress,
-        "message": message,
-        "result": result,
-        "error": error,
-        "updated_at": datetime.now().isoformat()
-    }
+    """更新任务状态（使用统一的TaskManager）"""
+    task_manager.update_task(task_id, status=status, progress=progress, message=message, result=result, error=error)
 
 def parse_hierarchical_sections(content: str) -> Dict[str, Dict[str, str]]:
-    """解析Markdown内容为层级结构"""
-    lines = content.split('\n')
-    sections = {}
-    current_h1 = None
-    current_h2 = None
-    current_content = []
-    
-    for line in lines:
-        line = line.strip()
-        
-        if line.startswith('# ') and not line.startswith('## '):
-            # 保存之前的H2内容
-            if current_h1 and current_h2:
-                if current_h1 not in sections:
-                    sections[current_h1] = {}
-                sections[current_h1][current_h2] = '\n'.join(current_content).strip()
-            
-            # 开始新的H1
-            current_h1 = line[2:].strip()
-            current_h2 = None
-            current_content = []
-            
-        elif line.startswith('## '):
-            # 保存之前的H2内容
-            if current_h1 and current_h2:
-                if current_h1 not in sections:
-                    sections[current_h1] = {}
-                sections[current_h1][current_h2] = '\n'.join(current_content).strip()
-            
-            # 开始新的H2
-            current_h2 = line[3:].strip()
-            current_content = []
-            
-        else:
-            # 普通内容行
-            if current_h2:  # 只有在H2下才收集内容
-                current_content.append(line)
-    
-    # 保存最后一个H2的内容
-    if current_h1 and current_h2:
-        if current_h1 not in sections:
-            sections[current_h1] = {}
-        sections[current_h1][current_h2] = '\n'.join(current_content).strip()
-    
-    return sections
+    """解析Markdown内容为层级结构（使用统一的DocumentParser）"""
+    return DocumentParser.parse_sections(content, max_level=3, preserve_order=True)
 
 def generate_unified_sections(original_content: str, corrected_content: str, consistency_issues: list, regenerated_sections: dict) -> Dict[str, Any]:
     """基于真实AI分析结果生成unified_sections数据"""
@@ -115,26 +65,36 @@ def generate_unified_sections(original_content: str, corrected_content: str, con
     for h1_title, h2_sections in original_sections.items():
         unified_sections[h1_title] = {}
         
-        for h2_title, original_section_content in h2_sections.items():
+        for section_key, original_section_content in h2_sections.items():
             if not original_section_content.strip() or len(original_section_content) < 50:
                 continue  # 跳过空章节或内容太少的章节
             
             # 获取修正后的章节内容
             corrected_section_content = original_section_content
-            if h1_title in corrected_sections and h2_title in corrected_sections[h1_title]:
-                corrected_section_content = corrected_sections[h1_title][h2_title]
+            if h1_title in corrected_sections and section_key in corrected_sections[h1_title]:
+                corrected_section_content = corrected_sections[h1_title][section_key]
             
             # 查找该章节的一致性问题
             suggestion = ""
             regenerated_content = original_section_content
             
+            # 提取h2和h3标题用于匹配（如果section_key包含 ">"）
+            if " > " in section_key:
+                h2_title, h3_title = section_key.split(" > ", 1)
+            else:
+                h2_title = section_key
+                h3_title = None
+            
             # 查找匹配的consistency_issues
             matched_issue = None
             for issue in consistency_issues:
-                if (issue.section_title == h2_title or 
+                if (issue.section_title == section_key or 
+                    issue.section_title == h2_title or
+                    (h3_title and issue.section_title == h3_title) or
                     issue.section_title == f"{h1_title} {h2_title}" or
                     h2_title in issue.section_title or
-                    issue.section_title in h2_title):
+                    (h3_title and h3_title in issue.section_title) or
+                    issue.section_title in section_key):
                     matched_issue = issue
                     break
             
@@ -147,8 +107,8 @@ def generate_unified_sections(original_content: str, corrected_content: str, con
                 else:
                     regenerated_content = corrected_section_content
                 
-                unified_sections[h1_title][h2_title] = {
-                    "section_title": h2_title,
+                unified_sections[h1_title][section_key] = {
+                    "section_title": section_key,
                     "original_content": original_section_content,
                     "suggestion": suggestion,
                     "regenerated_content": regenerated_content,
@@ -158,8 +118,8 @@ def generate_unified_sections(original_content: str, corrected_content: str, con
             elif original_section_content != corrected_section_content:
                 # 如果没有找到明确的一致性问题，但内容有变化
                 suggestion = "内容已优化"
-                unified_sections[h1_title][h2_title] = {
-                    "section_title": h2_title,
+                unified_sections[h1_title][section_key] = {
+                    "section_title": section_key,
                     "original_content": original_section_content,
                     "suggestion": suggestion,
                     "regenerated_content": corrected_section_content,
@@ -185,6 +145,7 @@ async def async_pipeline(request: PipelineRequest, background_tasks: BackgroundT
     task_id = create_task_id()
     
     # 初始化任务状态
+    task_manager.create_task(task_id)
     update_task_status(task_id, "pending", 0.0, "任务已创建，等待处理")
     
     # 添加后台任务
@@ -307,42 +268,26 @@ async def process_pipeline_async(task_id: str, request: PipelineRequest):
         # 生成唯一时间戳（包含毫秒，确保唯一性）
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
         
-        # 确保test_results目录存在 (使用相对路径)
-        results_dir = Path(__file__).parent.parent / "test_results"
-        results_dir.mkdir(exist_ok=True)
+        # 使用统一的输出目录
+        results_dir = Path(__file__).parent.parent / "outputs" / "thesis"
+        results_dir.mkdir(parents=True, exist_ok=True)
         
         # 生成唯一文件名
         unified_sections_file = results_dir / f"thesis_agent_unified_{task_id}_{timestamp}.json"
-        optimized_md_file = results_dir / f"thesis_optimized_{task_id}_{timestamp}.md"
         
-        # 1. 生成thesis_agent_unified JSON文件
+        # 生成thesis_agent_unified JSON文件
         with open(unified_sections_file, 'w', encoding='utf-8') as f:
             json.dump(unified_sections, f, ensure_ascii=False, indent=2)
-        
-        # 2. 生成thesis_optimized markdown文件
-        # 暂时使用原始文档内容，因为corrected_document可能有缓存问题
-        optimized_content = request.document_content
-        
-        # 调试信息
-        logger.info(f"原始文档长度: {len(request.document_content)} 字符")
-        if corrected_document:
-            logger.info(f"修正文档长度: {len(corrected_document)} 字符")
-        else:
-            logger.info("修正文档为空，使用原始文档")
-        
-        with open(optimized_md_file, 'w', encoding='utf-8') as f:
-            f.write(optimized_content)
         
         # 构建结果
         processing_time = 30.0  # 实际AI处理时间
         sections_count = sum(len(sections) for sections in unified_sections.values())
         result = {
             "unified_sections_file": str(unified_sections_file),
-            "optimized_content_file": str(optimized_md_file),
             "processing_time": processing_time,
             "sections_count": sections_count,
             "service_type": "thesis_agent",
-            "message": f"已生成2个文件: {unified_sections_file.name}, {optimized_md_file.name}",
+            "message": f"已生成文件: {unified_sections_file.name}",
             "timestamp": timestamp
         }
         
@@ -366,20 +311,10 @@ async def get_task_status(task_id: str):
     
     - **task_id**: 任务ID
     """
-    if task_id not in task_storage:
+    if not task_manager.task_exists(task_id):
         raise HTTPException(status_code=404, detail="任务不存在")
     
-    task_info = task_storage[task_id]
-    
-    return TaskStatusResponse(
-        task_id=task_info["task_id"],
-        status=task_info["status"],
-        progress=task_info["progress"],
-        message=task_info["message"],
-        result=task_info.get("result"),
-        error=task_info.get("error"),
-        updated_at=task_info["updated_at"]
-    )
+    return task_manager.get_task_status(task_id)
 
 @router.get("/v1/result/{task_id}", summary="获取纯净的章节结果")
 async def get_unified_sections(task_id: str):
@@ -390,10 +325,10 @@ async def get_unified_sections(task_id: str):
     
     返回处理后的章节结果，格式为嵌套的章节结构
     """
-    if task_id not in task_storage:
+    if not task_manager.task_exists(task_id):
         raise HTTPException(status_code=404, detail="任务不存在")
     
-    task_info = task_storage[task_id]
+    task_info = task_manager.get_task(task_id)
     
     if task_info["status"] != "completed":
         raise HTTPException(status_code=400, detail="任务尚未完成")
@@ -414,39 +349,6 @@ async def get_unified_sections(task_id: str):
     else:
         raise HTTPException(status_code=404, detail="未找到unified_sections文件")
 
-@router.get("/v1/optimized/{task_id}", summary="获取优化后的markdown文档")
-async def get_optimized_markdown(task_id: str):
-    """
-    获取优化后的完整markdown文档
-    
-    - **task_id**: 任务ID
-    
-    返回优化后的markdown文档内容
-    """
-    if task_id not in task_storage:
-        raise HTTPException(status_code=404, detail="任务不存在")
-    
-    task_info = task_storage[task_id]
-    
-    if task_info["status"] != "completed":
-        raise HTTPException(status_code=400, detail="任务尚未完成")
-    
-    # 从结果中获取优化后的markdown文件路径
-    result = task_info.get("result", {})
-    if isinstance(result, dict) and "optimized_content_file" in result:
-        markdown_file = result["optimized_content_file"]
-        
-        try:
-            with open(markdown_file, 'r', encoding='utf-8') as f:
-                content = f.read()
-            return {"content": content, "file_path": markdown_file}
-        except FileNotFoundError:
-            raise HTTPException(status_code=404, detail="优化后的markdown文件不存在")
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"读取文件失败: {str(e)}")
-    else:
-        raise HTTPException(status_code=404, detail="未找到优化后的markdown文件")
-
 @router.get("/v1/download/{task_id}", summary="下载处理结果")
 async def download_result(task_id: str):
     """
@@ -454,10 +356,10 @@ async def download_result(task_id: str):
     
     - **task_id**: 任务ID
     """
-    if task_id not in task_storage:
+    if not task_manager.task_exists(task_id):
         raise HTTPException(status_code=404, detail="任务不存在")
     
-    task_info = task_storage[task_id]
+    task_info = task_manager.get_task(task_id)
     
     if task_info["status"] != "completed":
         raise HTTPException(status_code=400, detail="任务尚未完成")
@@ -467,5 +369,5 @@ async def download_result(task_id: str):
         "task_id": task_id,
         "status": "completed",
         "files": result,
-        "download_info": "请使用 /v1/result/{task_id} 和 /v1/optimized/{task_id} 获取具体文件内容"
+        "download_info": "请使用 /v1/result/{task_id} 获取文件内容"
     }

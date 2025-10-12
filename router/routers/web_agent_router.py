@@ -25,6 +25,10 @@ from pydantic import BaseModel, Field
 web_agent_path = Path(__file__).parent.parent.parent / "web_agent_app"
 sys.path.insert(0, str(web_agent_path))
 
+# 添加shared到Python路径
+shared_path = Path(__file__).parent.parent.parent / "shared"
+sys.path.insert(0, str(shared_path))
+
 # 设置环境变量以兼容web_agent_app的配置
 import os
 if not os.getenv('LOG_LEVEL'):
@@ -35,6 +39,9 @@ if not os.getenv('ENABLE_PARALLEL_SEARCH'):
     os.environ['ENABLE_PARALLEL_SEARCH'] = 'true'
 if not os.getenv('ENABLE_PARALLEL_ENHANCEMENT'):
     os.environ['ENABLE_PARALLEL_ENHANCEMENT'] = 'true'
+
+# 导入统一的任务管理器和文档解析器
+from shared import TaskManager, TaskStatus, DocumentParser
 
 try:
     from whole_document_pipeline import WholeDocumentPipeline
@@ -80,67 +87,17 @@ logger = logging.getLogger(__name__)
 pipeline = None
 processing_tasks = {}
 
-# 使用一个简单的内存存储来跟踪任务状态
-_task_storage = {}
+# 使用统一的任务管理器
+task_manager = TaskManager()
 
 # 任务状态管理函数
 def update_task_status(task_id: str, status: str, progress: float, message: str, result: Any = None, error: str = None):
-    """更新任务状态"""
-    _task_storage[task_id] = {
-        "task_id": task_id,
-        "status": status,
-        "progress": progress,
-        "message": message,
-        "result": result,
-        "error": error,
-        "updated_at": datetime.now().isoformat()
-    }
+    """更新任务状态（使用统一的TaskManager）"""
+    task_manager.update_task(task_id, status=status, progress=progress, message=message, result=result, error=error)
 
 def extract_document_sections(document_content: str) -> Dict[str, Dict[str, str]]:
-    """提取文档中的章节内容，按一级标题和二级标题嵌套组织"""
-    sections = {}
-    lines = document_content.split('\n')
-    current_h1 = None
-    current_h2 = None
-    current_content = []
-    
-    for line in lines:
-        # 检查是否是一级标题
-        if line.strip().startswith('# ') and not line.strip().startswith('## '):
-            # 保存前一个二级章节
-            if current_h1 and current_h2 and current_content:
-                if current_h1 not in sections:
-                    sections[current_h1] = {}
-                sections[current_h1][current_h2] = '\n'.join(current_content).strip()
-            
-            # 开始新的一级标题
-            current_h1 = line.strip().replace('# ', '').strip()
-            current_h2 = None
-            current_content = []
-            
-        # 检查是否是二级标题
-        elif line.strip().startswith('## '):
-            # 保存前一个二级章节
-            if current_h1 and current_h2 and current_content:
-                if current_h1 not in sections:
-                    sections[current_h1] = {}
-                sections[current_h1][current_h2] = '\n'.join(current_content).strip()
-            
-            # 开始新的二级标题
-            current_h2 = line.strip().replace('## ', '').strip()
-            current_content = []
-            
-        elif current_h2:
-            # 添加到当前二级章节内容
-            current_content.append(line)
-    
-    # 保存最后一个章节
-    if current_h1 and current_h2 and current_content:
-        if current_h1 not in sections:
-            sections[current_h1] = {}
-        sections[current_h1][current_h2] = '\n'.join(current_content).strip()
-    
-    return sections
+    """提取文档中的章节内容，使用统一的DocumentParser"""
+    return DocumentParser.parse_sections(document_content, max_level=3, preserve_order=True)
 
 def _generate_markdown_from_claims(unified_claims: Dict[str, Any], original_document: str) -> str:
     """
@@ -185,20 +142,30 @@ def _generate_markdown_from_claims(unified_claims: Dict[str, Any], original_docu
             lines.append(f'# {h1_title}')
             lines.append('')
             
-            # 遍历二级标题
-            for h2_title in h2_sections.keys():
-                if h2_title in unified_claims[h1_title]:
-                    # 添加二级标题
-                    lines.append(f'## {h2_title}')
-                    lines.append('')
+            # 遍历二级和三级标题
+            for section_key in h2_sections.keys():
+                if section_key in unified_claims[h1_title]:
+                    # 解析section_key，可能包含h2或h2 > h3
+                    if " > " in section_key:
+                        h2_title, h3_title = section_key.split(" > ", 1)
+                        # 添加二级标题
+                        lines.append(f'## {h2_title}')
+                        lines.append('')
+                        # 添加三级标题
+                        lines.append(f'### {h3_title}')
+                        lines.append('')
+                    else:
+                        # 只有二级标题
+                        lines.append(f'## {section_key}')
+                        lines.append('')
                     
                     # 添加证据增强标记
                     lines.append("*[本章节的论断已通过证据搜索进行增强]*")
                     lines.append("")
                     
                     # 获取增强后的内容
-                    section_claims = unified_claims[h1_title][h2_title]
-                    enhanced_content = h2_sections[h2_title]  # 默认使用原内容
+                    section_claims = unified_claims[h1_title][section_key]
+                    enhanced_content = h2_sections[section_key]  # 默认使用原内容
                     
                     # 如果有增强的论断，替换相应内容
                     for claim_id, claim_data in section_claims.items():
@@ -1037,13 +1004,12 @@ async def process_evidence_pipeline_async(
             # 生成时间戳
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
             
-            # 确保test_results目录存在 (使用相对路径)
-            results_dir = Path(__file__).parent.parent / "test_results"
-            results_dir.mkdir(exist_ok=True)
+            # 使用统一的输出目录
+            results_dir = Path(__file__).parent.parent / "outputs" / "web_evidence"
+            results_dir.mkdir(parents=True, exist_ok=True)
             
             # 生成文件名
             unified_sections_file = results_dir / f"web_agent_unified_{task_id}_{timestamp}.json"
-            enhanced_md_file = results_dir / f"web_enhanced_{task_id}_{timestamp}.md"
             
             if result['status'] == 'success':
                 # 生成unified_sections格式的数据
@@ -1053,21 +1019,13 @@ async def process_evidence_pipeline_async(
                 with open(unified_sections_file, 'w', encoding='utf-8') as f:
                     json.dump(unified_sections, f, ensure_ascii=False, indent=2)
                 
-                # 生成增强后的文档内容
-                enhanced_content = generate_enhanced_content_from_result(result, document_content)
-                
-                # 保存增强后的markdown文件
-                with open(enhanced_md_file, 'w', encoding='utf-8') as f:
-                    f.write(enhanced_content)
-                
                 # 构建结果
                 final_result = {
                     "unified_sections_file": str(unified_sections_file),
-                    "enhanced_content_file": str(enhanced_md_file),
                     "processing_time": result.get('processing_time', 0),
                     "sections_count": len(unified_sections),
                     "service_type": "web_agent",
-                    "message": f"已生成2个文件: {unified_sections_file.name}, {enhanced_md_file.name}",
+                    "message": f"已生成文件: {unified_sections_file.name}",
                     "timestamp": timestamp
                 }
                 
@@ -1118,7 +1076,14 @@ def generate_unified_sections_from_result(result: Dict, original_content: str) -
     for h1_title, h2_sections in sections.items():
         unified_sections[h1_title] = {}
         
-        for h2_title, section_content in h2_sections.items():
+        for section_key, section_content in h2_sections.items():
+            # 提取h2和h3标题用于匹配（如果section_key包含 ">"）
+            if " > " in section_key:
+                h2_title, h3_title = section_key.split(" > ", 1)
+            else:
+                h2_title = section_key
+                h3_title = None
+            
             # 查找该章节的论断
             section_claims = []
             for claim in evidence_analysis_data:
@@ -1127,9 +1092,12 @@ def generate_unified_sections_from_result(result: Dict, original_content: str) -
                 else:
                     section_title = getattr(claim, 'section_title', '')
                 
-                if (section_title == h2_title or 
+                if (section_title == section_key or 
+                    section_title == h2_title or
+                    (h3_title and section_title == h3_title) or
                     section_title == f"{h1_title} {h2_title}" or
                     h2_title in section_title or
+                    (h3_title and h3_title in section_title) or
                     section_title == h1_title):
                     section_claims.append(claim)
             
@@ -1170,7 +1138,13 @@ def generate_unified_sections_from_result(result: Dict, original_content: str) -
                             enhanced_doc = f.read()
                             # 尝试提取对应章节的增强内容
                             import re
-                            pattern = rf"## {re.escape(h2_title)}(.*?)(?=##|\Z)"
+                            # 尝试匹配h2标题或h3标题
+                            if h3_title:
+                                # 先尝试匹配h3标题
+                                pattern = rf"### {re.escape(h3_title)}(.*?)(?=###|##|\Z)"
+                            else:
+                                # 匹配h2标题
+                                pattern = rf"## {re.escape(h2_title)}(.*?)(?=##|\Z)"
                             match = re.search(pattern, enhanced_doc, re.DOTALL)
                             if match:
                                 enhanced_section = match.group(1).strip()
@@ -1181,7 +1155,7 @@ def generate_unified_sections_from_result(result: Dict, original_content: str) -
                 
                 suggestion = "; ".join(suggestions) if suggestions else f"发现 {len(section_claims)} 个论断，找到 {total_evidence_count} 个证据支持"
                 
-                unified_sections[h1_title][h2_title] = {
+                unified_sections[h1_title][section_key] = {
                     "original_content": section_content,
                     "suggestion": suggestion,
                     "regenerated_content": enhanced_content,
@@ -1189,26 +1163,10 @@ def generate_unified_sections_from_result(result: Dict, original_content: str) -
                     "status": "enhanced" if total_evidence_count > 0 else "identified"
                 }
                 
-                print(f"✅ 章节 {h2_title}: {len(section_claims)} 个论断, {total_evidence_count} 个证据")
+                print(f"✅ 章节 {section_key}: {len(section_claims)} 个论断, {total_evidence_count} 个证据")
     
     print(f"📊 生成unified_sections: {len(unified_sections)} 个H1标题")
     return unified_sections
-
-def generate_enhanced_content_from_result(result: Dict, original_content: str) -> str:
-    """从pipeline结果生成增强后的文档内容"""
-    # 从result中读取实际的enhanced_document文件
-    if 'output_files' in result and 'enhanced_document' in result['output_files']:
-        enhanced_file_path = result['output_files']['enhanced_document']
-        try:
-            with open(enhanced_file_path, 'r', encoding='utf-8') as f:
-                enhanced_content = f.read()
-                print(f"✅ 成功读取增强文档: {len(enhanced_content)} 字符")
-                return enhanced_content
-        except Exception as e:
-            print(f"❌ 读取增强文档失败: {e}")
-    
-    print("⚠️ 未找到增强文档，使用原始内容")
-    return original_content
 
 @router.post("/v1/evidence-pipeline-async")
 async def evidence_pipeline_async(
@@ -1224,10 +1182,11 @@ async def evidence_pipeline_async(
     task_id = str(uuid.uuid4())
     
     # 初始化任务状态
+    task_manager.create_task(task_id)
     update_task_status(task_id, "pending", 0.0, "任务已提交，等待处理...")
-    print(f"🔧 任务 {task_id} 已创建，当前存储中的任务数: {len(_task_storage)}")
-    print(f"🔍 任务创建后存储内容: {task_id in _task_storage}")
-    print(f"🔍 存储中的所有任务: {list(_task_storage.keys())}")
+    print(f"🔧 任务 {task_id} 已创建，当前存储中的任务数: {len(task_manager.storage)}")
+    print(f"🔍 任务创建后存储内容: {task_manager.task_exists(task_id)}")
+    print(f"🔍 存储中的所有任务: {list(task_manager.storage.keys())}")
     
     # 启动后台任务
     background_tasks.add_task(
@@ -1248,21 +1207,21 @@ async def evidence_pipeline_async(
 @router.get("/v1/task/{task_id}")
 async def get_evidence_task_status(task_id: str):
     """查询证据增强任务状态"""
-    print(f"🔍 查询任务 {task_id}，当前存储中的任务数: {len(_task_storage)}")
-    print(f"🔍 存储中的任务ID列表: {list(_task_storage.keys())}")
+    print(f"🔍 查询任务 {task_id}，当前存储中的任务数: {len(task_manager.storage)}")
+    print(f"🔍 存储中的任务ID列表: {list(task_manager.storage.keys())}")
     
-    if task_id not in _task_storage:
+    if not task_manager.task_exists(task_id):
         raise HTTPException(status_code=404, detail="任务不存在")
     
-    return _task_storage[task_id]
+    return task_manager.get_task_status(task_id)
 
 @router.get("/v1/result/{task_id}")
 async def get_evidence_result(task_id: str):
     """获取纯净的论断分析结果JSON"""
-    if task_id not in _task_storage:
+    if not task_manager.task_exists(task_id):
         raise HTTPException(status_code=404, detail="任务不存在")
     
-    task_info = _task_storage[task_id]
+    task_info = task_manager.get_task(task_id)
     if task_info["status"] != "completed":
         raise HTTPException(status_code=400, detail="任务尚未完成")
     
@@ -1281,32 +1240,6 @@ async def get_evidence_result(task_id: str):
             raise HTTPException(status_code=500, detail=f"读取文件失败: {str(e)}")
     else:
         raise HTTPException(status_code=404, detail="未找到unified_sections文件")
-
-@router.get("/v1/enhanced/{task_id}")
-async def get_enhanced_document(task_id: str):
-    """获取证据增强后的markdown文档"""
-    if task_id not in _task_storage:
-        raise HTTPException(status_code=404, detail="任务不存在")
-    
-    task_info = _task_storage[task_id]
-    if task_info["status"] != "completed":
-        raise HTTPException(status_code=400, detail="任务尚未完成")
-    
-    # 从结果中获取enhanced_content文件路径并读取内容
-    result = task_info.get("result", {})
-    if isinstance(result, dict) and "enhanced_content_file" in result:
-        enhanced_content_file = result["enhanced_content_file"]
-        
-        try:
-            with open(enhanced_content_file, 'r', encoding='utf-8') as f:
-                content = f.read()
-            return {"enhanced_document": content}
-        except FileNotFoundError:
-            raise HTTPException(status_code=404, detail="增强文档不存在")
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"读取文件失败: {str(e)}")
-    else:
-        raise HTTPException(status_code=404, detail="未找到enhanced_content文件")
 
 # =============================================================================
 # 后台处理函数

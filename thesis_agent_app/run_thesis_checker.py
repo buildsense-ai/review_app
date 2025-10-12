@@ -46,7 +46,7 @@ class ThesisConsistencyPipeline:
         self.logger = logging.getLogger(__name__)
     
     def run_full_pipeline(self, document_file: str, document_title: Optional[str] = None, 
-                         output_dir: str = "./thesis_outputs", 
+                         output_dir: str = None, 
                          auto_correct: bool = True) -> dict:
         """
         运行简化的论点一致性检查流水线（3步流程）
@@ -305,7 +305,7 @@ class ThesisConsistencyPipeline:
 
 
 def analyze_document_from_file(file_path: str, document_title: Optional[str] = None, 
-                             output_dir: str = "./thesis_outputs",
+                             output_dir: str = None,
                              auto_correct: bool = True):
     """
     从文件读取文档内容并进行完整的论点一致性检查
@@ -349,7 +349,9 @@ def main():
     
     # 默认配置
     default_file_path = "final_markdown_merged_document_20250828_160506.md"
-    default_output_dir = "./test_results"
+    # 统一输出到 router/outputs/thesis
+    from pathlib import Path
+    default_output_dir = str(Path(__file__).parent.parent / "router" / "outputs" / "thesis")
     
     # 如果没有提供参数，使用默认配置
     if len(sys.argv) < 2:
@@ -375,7 +377,7 @@ def main():
         # 解析命令行参数
         file_path = sys.argv[1]
         document_title = None
-        output_dir = default_output_dir  # 默认使用 test_results
+        output_dir = default_output_dir  # 默认使用 router/outputs/thesis
         auto_correct = True
     
         i = 2

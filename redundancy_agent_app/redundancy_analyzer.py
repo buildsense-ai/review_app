@@ -37,7 +37,7 @@ class RedundancyAnalyzer:
         )
         
         # 冗余分析提示词模板（从 document_reviewer.py 提取）
-        self.redundancy_analysis_prompt = """
+        self.redundancy_analysis_prompt = f"""
 你是文档冗余分析专家。任务：找出文档中所有重复、冗余的内容并提出修改建议。
 
 # 分析范围
@@ -48,24 +48,73 @@ class RedundancyAnalyzer:
 2. **章节内重复**：同一章节反复说同样的事
 
 # 输出格式
-只返回JSON数组，无其他文字：
+只返回JSON数组，无其他文字。统一使用以下格式：
 
-**跨章节重复：**
 ```json
-[{"subtitles": ["章节1", "章节2"], "suggestion": "在「章节1」保留...，在「章节2」删除..."}]
+[{"subtitle": "章节名", "suggestion": "具体修改建议..."}]
 ```
 
-**章节内重复：**
-```json
-[{"subtitle": "章节名", "suggestion": "合并重复表述..."}]
-```
+**重要：对于跨章节重复，请为每个涉及的章节分别生成一条建议：**
+- 每个章节一条独立的记录
+- 建议中要明确说明该章节需要保留/删除/修改什么内容
+- 可以在建议中提及其他相关章节作为上下文，例如："删除与「第一章：项目引言」重复的核心目标描述，改为简要引用"
 
 # 关键要求
 - 积极寻找：相同句子、相似表述、重复概念
 - 重点关注：项目名称、地点、目标、意义等易重复内容
-- 宁可多找，不要遗漏
 - **必须至少提出1个优化建议，即使是微小的改进（如语言精炼、表述优化、结构调整等）**
 - **禁止返回空数组[]，必须找到至少一个可改进点**
+
+# 示例分析
+
+## 示例一：跨章节重复
+
+User: 
+```markdown
+待分析文档：## 第一章：项目引言
+“智慧城市交通系统”项目旨在通过先进的物联网技术和大数据分析，实时优化城市交通流量，减少拥堵。我们的核心目标是构建一个能够动态调整交通信号灯、引导车辆路径的智能平台。
+
+## 第二章：技术架构
+系统的技术栈包括...
+
+## 第三章：结论
+总而言之，本项目意义重大。通过构建一个能够动态调整交通信号灯、引导车辆路径的智能平台，我们将能有效改善城市的交通状况。
+```
+
+Assistant: 
+
+```json
+[
+{
+    "subtitle": "第一章：项目引言",
+    "suggestion": "保留本章对项目核心目标的详细定义，这是项目的首次完整介绍，应当保持详细描述。"
+},
+{
+    "subtitle": "第三章：结论",
+    "suggestion": "删除与「第一章：项目引言」重复的核心目标完整描述。建议将"通过构建一个能够动态调整交通信号灯、引导车辆路径的智能平台"改为"通过实现项目核心目标"，使结论更精炼，避免冗余。"
+}
+]
+```
+
+## 示例二：章节内重复
+
+User: 
+```markdown
+待分析文档：## 第四章：数据分析模块
+数据分析模块是本系统的关键部分。它的主要职责是处理从传感器收集的海量数据，并从中提取有价值的模式。这个模块必须保证高精度的分析结果。
+
+为了确保系统的可靠性，我们对数据分析模块进行了特别设计。它能够高效处理海量数据，并从中挖掘出隐藏的规律和模式。提供高精度的分析是该模块的首要任务。
+
+```
+
+Assistant: 
+
+```json
+[{
+    "subtitle": "第四章：数据分析模块",
+    "suggestion": "在「第四章：数据分析模块」中，第一段和第二段内容高度相似，都在描述模块“处理海量数据、提取模式、保证高精度”的功能。建议合并这两段，消除冗余。例如，可以保留第一段的描述，并将第二段中独特的关键词（如“可靠性”、“高效”）整合进去，形成一个更全面的段落。"
+}]
+```
 
 待分析文档：
 $document_content
@@ -222,22 +271,13 @@ $document_content
             
             if isinstance(parsed_data, list):
                 for item in parsed_data:
-                    # 处理单章节冗余（subtitle字段）
+                    # 统一处理所有建议（包括单章节和跨章节）
                     subtitle = item.get('subtitle', '')
-                    # 处理多章节冗余（subtitles字段）
-                    subtitles = item.get('subtitles', [])
                     suggestion = item.get('suggestion', '')
                     
                     if subtitle and suggestion:
-                        # 单章节冗余
                         modification_instructions.append({
                             "subtitle": subtitle,
-                            "suggestion": suggestion
-                        })
-                    elif subtitles and suggestion:
-                        # 多章节冗余
-                        modification_instructions.append({
-                            "subtitles": subtitles,
                             "suggestion": suggestion
                         })
             

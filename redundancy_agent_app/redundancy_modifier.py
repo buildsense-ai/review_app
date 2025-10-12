@@ -77,8 +77,8 @@ class RedundancyModifier:
 - 如果建议要求删除某句话，必须完全删除
 - 如果建议要求保留某内容，必须保留
 - 如果建议要求合并重复内容，请精炼表述
-- 严格执行建议，不要保守
 - 保持Markdown格式
+- 不要修改Markdown的主体格式，比如换行符，标题符号等等，只需要修改内容
 - 不要添加标题行（标题已经存在）
 
 请直接输出修改后的Markdown内容："""
@@ -161,11 +161,10 @@ class RedundancyModifier:
         
         for instruction in modification_instructions:
             subtitle = instruction.get('subtitle')
-            subtitles = instruction.get('subtitles')
             suggestion = instruction.get('suggestion', '')
             
-            # 处理单章节修改
-            if subtitle:
+            # 统一处理所有修改（单章节和跨章节都使用相同格式）
+            if subtitle and suggestion:
                 section_info = self.find_section_in_parsed(parsed_sections, subtitle)
                 if section_info:
                     h1_title, section_key, original_content = section_info
@@ -187,31 +186,6 @@ class RedundancyModifier:
                         "word_count": len(regenerated_content),
                         "status": "modified"
                     }
-            
-            # 处理跨章节修改
-            elif subtitles:
-                for sub_title in subtitles:
-                    section_info = self.find_section_in_parsed(parsed_sections, sub_title)
-                    if section_info:
-                        h1_title, section_key, original_content = section_info
-                        
-                        # 调用 LLM 修改
-                        regenerated_content = self.modify_section(
-                            original_content, 
-                            section_key, 
-                            suggestion
-                        )
-                        
-                        full_key = f"{h1_title}:{section_key}"
-                        modified_sections[full_key] = {
-                            "h1_title": h1_title,
-                            "section_key": section_key,
-                            "original_content": original_content,
-                            "regenerated_content": regenerated_content,
-                            "suggestion": suggestion,
-                            "word_count": len(regenerated_content),
-                            "status": "modified"
-                        }
         
         self.logger.info(f"✅ 完成修改 {len(modified_sections)} 个章节")
         

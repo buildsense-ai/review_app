@@ -37,7 +37,7 @@ class RedundancyAnalyzer:
         )
         
         # 冗余分析提示词模板（从 document_reviewer.py 提取）
-        self.redundancy_analysis_prompt = f"""
+        self.redundancy_analysis_prompt = """
 你是文档冗余分析专家。任务：找出文档中所有重复、冗余的内容并提出修改建议。
 
 # 分析范围

@@ -82,6 +82,7 @@ class TableModifier:
 - 表头下方使用 |---|---|---| 分隔
 - 不要添加标题行（标题已经存在）
 - 保持其他非结构化内容不变
+- 不要使用代码块标记（如 ```markdown 或 ```），直接输出纯Markdown内容
 
 请直接输出优化后的Markdown内容（包含表格）："""
             
@@ -100,6 +101,14 @@ class TableModifier:
             )
             
             modified_content = response.choices[0].message.content.strip()
+            
+            # 清理可能的代码块标记
+            if modified_content.startswith('```markdown'):
+                modified_content = modified_content[len('```markdown'):].strip()
+            elif modified_content.startswith('```'):
+                modified_content = modified_content[3:].strip()
+            if modified_content.endswith('```'):
+                modified_content = modified_content[:-3].strip()
             
             # 清理可能多余的标题行
             lines = modified_content.split('\n')

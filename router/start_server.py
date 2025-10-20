@@ -6,13 +6,17 @@
 
 import os
 import sys
-import uvicorn
 from pathlib import Path
 
-# 添加项目根目录到Python路径
-project_root = Path(__file__).parent
+# 添加项目根目录到Python路径（重要：在导入其他模块之前）
+project_root = Path(__file__).parent.parent  # 指向 review_agent_save 目录
 sys.path.insert(0, str(project_root))
 
+# 添加router目录到Python路径
+router_dir = Path(__file__).parent
+sys.path.insert(0, str(router_dir))
+
+import uvicorn
 from config import get_config
 
 def main():
@@ -25,7 +29,6 @@ def main():
     config.print_config_summary()
     
     # 确保必要的目录存在（统一输出到router/outputs和router/temp_files）
-    router_dir = Path(__file__).parent
     outputs_dir = router_dir / "outputs"
     temp_dir = router_dir / "temp_files"
     
@@ -33,6 +36,8 @@ def main():
     os.makedirs(outputs_dir / "final_review", exist_ok=True)
     os.makedirs(outputs_dir / "thesis", exist_ok=True)
     os.makedirs(outputs_dir / "web_evidence", exist_ok=True)
+    os.makedirs(outputs_dir / "redundancy_agent", exist_ok=True)
+    os.makedirs(outputs_dir / "table_agent", exist_ok=True)
     os.makedirs(temp_dir, exist_ok=True)
     
     print(f"✅ 输出目录: {outputs_dir}")

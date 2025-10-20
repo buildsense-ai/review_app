@@ -10,6 +10,7 @@ import logging
 import re
 from typing import Dict, Any, List, Optional
 from openai import OpenAI
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # 导入共享模块
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
@@ -152,7 +153,7 @@ class RedundancyModifier:
     def apply_modifications(self, markdown_content: str, 
                           modification_instructions: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
         """
-        应用所有修改指令
+        应用所有修改指令（并行处理）
         
         Args:
             markdown_content: 原始 Markdown 内容
@@ -161,30 +162,50 @@ class RedundancyModifier:
         Returns:
             Dict: 修改后的章节数据 {section_title: {original_content, regenerated_content, suggestion, ...}}
         """
-        self.logger.info(f"📝 开始应用 {len(modification_instructions)} 个修改指令")
+        self.logger.info(f"📝 开始应用 {len(modification_instructions)} 个修改指令（并行处理）")
         
         # 解析文档结构
         parsed_sections = self.parse_document_sections(markdown_content)
         
-        modified_sections = {}
-        
+        # 准备任务列表
+        tasks = []
         for instruction in modification_instructions:
             subtitle = instruction.get('subtitle')
             suggestion = instruction.get('suggestion', '')
             
-            # 统一处理所有修改（单章节和跨章节都使用相同格式）
             if subtitle and suggestion:
                 section_info = self.find_section_in_parsed(parsed_sections, subtitle)
                 if section_info:
-                    h1_title, section_key, original_content = section_info
-                    
-                    # 调用 LLM 修改
-                    regenerated_content = self.modify_section(
-                        original_content, 
-                        section_key, 
-                        suggestion
-                    )
-                    
+                    tasks.append((section_info, suggestion))
+        
+        if not tasks:
+            self.logger.warning("⚠️ 没有找到需要修改的章节")
+            return {}
+        
+        self.logger.info(f"🔄 使用线程池并行处理 {len(tasks)} 个章节（max_workers=5）")
+        
+        # 使用线程池并行处理
+        modified_sections = {}
+        with ThreadPoolExecutor(max_workers=5) as executor:
+            # 提交所有任务
+            future_to_task = {
+                executor.submit(
+                    self.modify_section,
+                    section_info[2],  # original_content
+                    section_info[1],  # section_key
+                    suggestion
+                ): (section_info, suggestion)
+                for section_info, suggestion in tasks
+            }
+            
+            # 收集结果
+            completed = 0
+            for future in as_completed(future_to_task):
+                section_info, suggestion = future_to_task[future]
+                h1_title, section_key, original_content = section_info
+                
+                try:
+                    regenerated_content = future.result()
                     full_key = f"{h1_title}:{section_key}"
                     modified_sections[full_key] = {
                         "h1_title": h1_title,
@@ -195,6 +216,10 @@ class RedundancyModifier:
                         "word_count": len(regenerated_content),
                         "status": "modified"
                     }
+                    completed += 1
+                    self.logger.info(f"✅ 进度: {completed}/{len(tasks)} - {section_key}")
+                except Exception as e:
+                    self.logger.error(f"❌ 章节修改失败 {section_key}: {e}")
         
         self.logger.info(f"✅ 完成修改 {len(modified_sections)} 个章节")
         

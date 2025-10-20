@@ -9,6 +9,7 @@ import sys
 import logging
 from typing import Dict, Any, List, Optional
 from openai import OpenAI
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # 导入共享模块
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
@@ -154,7 +155,7 @@ class TableModifier:
     def apply_modifications(self, markdown_content: str, 
                           table_opportunities: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
         """
-        应用所有表格优化
+        应用所有表格优化（并行处理）
         
         Args:
             markdown_content: 原始 Markdown 内容
@@ -163,13 +164,13 @@ class TableModifier:
         Returns:
             Dict: 优化后的章节数据 {section_title: {original_content, regenerated_content, suggestion, ...}}
         """
-        self.logger.info(f"📊 开始应用 {len(table_opportunities)} 个表格优化")
+        self.logger.info(f"📊 开始应用 {len(table_opportunities)} 个表格优化（并行处理）")
         
         # 解析文档结构
         parsed_sections = self.parse_document_sections(markdown_content)
         
-        modified_sections = {}
-        
+        # 准备任务列表
+        tasks = []
         for opportunity in table_opportunities:
             section_title = opportunity.get('section_title', '')
             table_suggestion = opportunity.get('table_opportunity', '')
@@ -179,25 +180,50 @@ class TableModifier:
             
             section_info = self.find_section_in_parsed(parsed_sections, section_title)
             if section_info:
+                tasks.append((section_info, table_suggestion))
+        
+        if not tasks:
+            self.logger.warning("⚠️ 没有找到需要优化的章节")
+            return {}
+        
+        self.logger.info(f"🔄 使用线程池并行处理 {len(tasks)} 个章节（max_workers=5）")
+        
+        # 使用线程池并行处理
+        modified_sections = {}
+        with ThreadPoolExecutor(max_workers=5) as executor:
+            # 提交所有任务
+            future_to_task = {
+                executor.submit(
+                    self.apply_table_optimization,
+                    section_info[2],  # original_content
+                    section_info[1],  # section_key
+                    table_suggestion
+                ): (section_info, table_suggestion)
+                for section_info, table_suggestion in tasks
+            }
+            
+            # 收集结果
+            completed = 0
+            for future in as_completed(future_to_task):
+                section_info, table_suggestion = future_to_task[future]
                 h1_title, section_key, original_content = section_info
                 
-                # 调用 LLM 应用表格优化
-                regenerated_content = self.apply_table_optimization(
-                    original_content, 
-                    section_key, 
-                    table_suggestion
-                )
-                
-                full_key = f"{h1_title}:{section_key}"
-                modified_sections[full_key] = {
-                    "h1_title": h1_title,
-                    "section_key": section_key,
-                    "original_content": original_content,
-                    "regenerated_content": regenerated_content,
-                    "suggestion": table_suggestion,
-                    "word_count": len(regenerated_content),
-                    "status": "table_optimized"
-                }
+                try:
+                    regenerated_content = future.result()
+                    full_key = f"{h1_title}:{section_key}"
+                    modified_sections[full_key] = {
+                        "h1_title": h1_title,
+                        "section_key": section_key,
+                        "original_content": original_content,
+                        "regenerated_content": regenerated_content,
+                        "suggestion": table_suggestion,
+                        "word_count": len(regenerated_content),
+                        "status": "table_optimized"
+                    }
+                    completed += 1
+                    self.logger.info(f"✅ 进度: {completed}/{len(tasks)} - {section_key}")
+                except Exception as e:
+                    self.logger.error(f"❌ 章节优化失败 {section_key}: {e}")
         
         self.logger.info(f"✅ 完成优化 {len(modified_sections)} 个章节")
         

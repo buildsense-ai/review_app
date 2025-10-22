@@ -306,48 +306,141 @@ async def pipeline_stream(request: DocumentOptimizeRequest):
                 request.document_content
             )
             
-            # 阶段5：逐章节处理 (40-90%)
+            # 阶段5：逐章节处理（并行处理，最多3个并发）(40-90%)
             modified_sections = {}
             
-            for i, opportunity in enumerate(table_opportunities, 1):
+            # 准备所有任务
+            tasks_info = []
+            for opportunity in table_opportunities:
                 section_title = opportunity.get('section_title')
                 table_suggestion = opportunity.get('table_opportunity', '')
-                
-                # 计算进度 (40% -> 90%)
-                progress = 40 + int((i / total_chapters) * 50)
-                
-                yield format_sse_message("progress", {
-                    "status": "processing",
-                    "message": f"正在优化章节 {i}/{total_chapters}: {section_title}",
-                    "progress": progress,
-                    "current_chapter": i,
-                    "total_chapters": total_chapters
-                })
                 
                 if section_title and table_suggestion:
                     section_info = agent.modifier.find_section_in_parsed(parsed_sections, section_title)
                     if section_info:
                         h1_title, section_key, original_content = section_info
-                        
-                        # 在独立线程中执行表格优化
-                        regenerated_content = await asyncio.to_thread(
-                            agent.modifier.apply_table_optimization,
-                            original_content,
-                            section_key,
-                            table_suggestion
-                        )
-                        
-                        # 保存修改结果
-                        full_key = f"{h1_title} > {section_key}"
-                        modified_sections[full_key] = {
+                        tasks_info.append({
+                            'section_title': section_title,
                             'h1_title': h1_title,
                             'section_key': section_key,
                             'original_content': original_content,
+                            'table_suggestion': table_suggestion
+                        })
+                    else:
+                        logger.warning(f"未找到章节: {section_title}")
+                else:
+                    logger.warning(f"章节缺少section_title或table_suggestion")
+            
+            # 如果没有有效任务，跳过处理
+            if not tasks_info:
+                logger.warning("没有找到需要优化的章节")
+                yield format_sse_message("progress", {
+                    "status": "completed",
+                    "message": "未发现表格优化机会",
+                    "progress": 100
+                })
+                yield format_sse_message("result", {"chapters": []})
+                yield format_sse_message("end", {"status": "completed"})
+                return
+            
+            # 使用信号量控制并发数
+            semaphore = asyncio.Semaphore(3)
+            
+            # 异步处理单个章节的包装函数
+            async def process_single_section(task_info, task_index):
+                """处理单个章节并返回结果"""
+                async with semaphore:
+                    try:
+                        regenerated_content = await asyncio.to_thread(
+                            agent.modifier.apply_table_optimization,
+                            task_info['original_content'],
+                            task_info['section_key'],
+                            task_info['table_suggestion']
+                        )
+                        
+                        # 检查生成内容是否有效
+                        if not regenerated_content or len(regenerated_content.strip()) == 0:
+                            logger.warning(f"表格优化返回空内容: {task_info['section_title']}")
+                            return {
+                                'success': False,
+                                'task_index': task_index,
+                                'section_title': task_info['section_title'],
+                                'error': '返回内容为空'
+                            }
+                        
+                        return {
+                            'success': True,
+                            'task_index': task_index,
+                            'section_title': task_info['section_title'],
+                            'h1_title': task_info['h1_title'],
+                            'section_key': task_info['section_key'],
+                            'original_content': task_info['original_content'],
                             'regenerated_content': regenerated_content,
-                            'suggestion': table_suggestion,
-                            'word_count': len(regenerated_content),
-                            'status': 'table_optimized'
+                            'table_suggestion': task_info['table_suggestion'],
                         }
+                    except Exception as e:
+                        logger.error(f"表格优化失败 {task_info['section_title']}: {e}")
+                        return {
+                            'success': False,
+                            'task_index': task_index,
+                            'section_title': task_info['section_title'],
+                            'error': str(e)
+                        }
+            
+            # 创建所有并发任务
+            logger.info(f"开始并行处理 {len(tasks_info)} 个章节（最大并发数: 3）")
+            pending_tasks = [
+                asyncio.create_task(process_single_section(task_info, idx))
+                for idx, task_info in enumerate(tasks_info, 1)
+            ]
+            
+            # 使用 as_completed 按完成顺序处理结果
+            completed_count = 0
+            for completed_task in asyncio.as_completed(pending_tasks):
+                result = await completed_task
+                completed_count += 1
+                
+                # 计算进度 (40% -> 90%)
+                progress = 40 + int((completed_count / len(tasks_info)) * 50)
+                
+                if result['success']:
+                    # 保存修改结果
+                    full_key = f"{result['h1_title']} > {result['section_key']}"
+                    modified_sections[full_key] = {
+                        'h1_title': result['h1_title'],
+                        'section_key': result['section_key'],
+                        'original_content': result['original_content'],
+                        'regenerated_content': result['regenerated_content'],
+                        'suggestion': result['table_suggestion'],
+                        'word_count': len(result['regenerated_content']),
+                        'status': 'table_optimized'
+                    }
+                    
+                    # 推送进度更新（成功）
+                    yield format_sse_message("progress", {
+                        "status": "processing",
+                        "message": f"完成章节 {completed_count}/{len(tasks_info)}: {result['section_title']}",
+                        "progress": progress,
+                        "current_chapter": completed_count,
+                        "total_chapters": len(tasks_info)
+                    })
+                    logger.info(f"章节完成 ({completed_count}/{len(tasks_info)}): {result['section_title']}")
+                else:
+                    # 推送进度更新（失败）
+                    yield format_sse_message("progress", {
+                        "status": "processing",
+                        "message": f"章节处理失败 {completed_count}/{len(tasks_info)}: {result['section_title']}",
+                        "progress": progress,
+                        "current_chapter": completed_count,
+                        "total_chapters": len(tasks_info),
+                        "error": result.get('error', '未知错误')
+                    })
+                    logger.warning(f"章节失败 ({completed_count}/{len(tasks_info)}): {result['section_title']} - {result.get('error')}")
+                
+                # 短暂延迟，避免前端更新过快
+                await asyncio.sleep(0.05)
+            
+            logger.info(f"并行处理完成，成功优化 {len(modified_sections)}/{len(tasks_info)} 个章节")
             
             # 阶段6：构建输出 (95%)
             yield format_sse_message("progress", {
@@ -387,10 +480,21 @@ async def pipeline_stream(request: DocumentOptimizeRequest):
                             "comment": content.get("suggestion", "")
                         })
             
+            # 保存结果到文件
+            task_id = str(uuid.uuid4())
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
+            results_dir = Path(__file__).parent.parent / "outputs" / "table_agent"
+            results_dir.mkdir(parents=True, exist_ok=True)
+            unified_sections_file = results_dir / f"table_unified_{task_id}_{timestamp}.json"
+            
+            with open(unified_sections_file, 'w', encoding='utf-8') as f:
+                json.dump(unified_sections, f, ensure_ascii=False, indent=2)
+            
             # 阶段7：返回最终结果 (100%)
             yield format_sse_message("result", {
                 "chapters": chapters,
-                "summary": f"优化完成，共优化 {len(chapters)} 个章节"
+                "summary": f"优化完成，共优化 {len(chapters)} 个章节",
+                "saved_file": str(unified_sections_file)
             })
             
             yield format_sse_message("end", {

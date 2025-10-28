@@ -161,10 +161,31 @@ $document_content
                 )
             
             # 调用OpenRouter API进行论点提取
-            extraction_result = self._call_openrouter_api(document_content)
+            try:
+                extraction_result = self._call_openrouter_api(document_content)
+            except Exception as api_error:
+                self.colored_logger.error(f"❌ API调用失败: {api_error}")
+                return ThesisStatement(
+                    main_thesis=f"API调用失败: {str(api_error)}",
+                    supporting_arguments=[],
+                    key_concepts=[]
+                )
             
             # 解析API响应
-            thesis_statement = self._parse_api_response(extraction_result)
+            try:
+                thesis_statement = self._parse_api_response(extraction_result)
+            except Exception as parse_error:
+                self.colored_logger.error(f"❌ 响应解析失败: {parse_error}")
+                return ThesisStatement(
+                    main_thesis=f"响应解析失败: {str(parse_error)}",
+                    supporting_arguments=[],
+                    key_concepts=[]
+                )
+            
+            # 检查是否成功提取到论点
+            if not thesis_statement.main_thesis or thesis_statement.main_thesis.startswith("提取失败") or thesis_statement.main_thesis.startswith("API调用失败") or thesis_statement.main_thesis.startswith("响应解析失败"):
+                self.colored_logger.error(f"❌ 论点提取失败或为空")
+                return thesis_statement
             
             # 记录提取结果
             self.colored_logger.thesis_found(thesis_statement.main_thesis)
@@ -173,7 +194,9 @@ $document_content
             return thesis_statement
             
         except Exception as e:
-            self.colored_logger.error(f"❌ 论点提取失败: {e}")
+            self.colored_logger.error(f"❌ 论点提取失败（未知错误）: {e}")
+            import traceback
+            self.colored_logger.error(f"完整错误信息: {traceback.format_exc()}")
             return ThesisStatement(
                 main_thesis=f"提取失败: {str(e)}",
                 supporting_arguments=[],
@@ -226,6 +249,16 @@ $document_content
             
             response_content = completion.choices[0].message.content
             
+            # 检查响应完整性
+            if hasattr(completion, 'usage'):
+                self.colored_logger.info(f"📊 Token使用情况: {completion.usage}")
+            
+            finish_reason = completion.choices[0].finish_reason if hasattr(completion.choices[0], 'finish_reason') else None
+            if finish_reason == 'length':
+                self.colored_logger.warning("⚠️ API响应被截断（达到max_tokens限制），建议增加max_tokens配置")
+            elif finish_reason:
+                self.colored_logger.debug(f"完成原因: {finish_reason}")
+            
             self.colored_logger.api_response(f"API调用成功，响应长度: {len(response_content)} 字符")
             
             return response_content
@@ -245,6 +278,11 @@ $document_content
             ThesisStatement: 解析后的论点结构
         """
         try:
+            # 添加调试日志：记录原始响应的前后部分
+            self.colored_logger.info(f"📝 API响应总长度: {len(api_response)} 字符")
+            self.colored_logger.debug(f"📝 API响应前200字符: {api_response[:200]}")
+            self.colored_logger.debug(f"📝 API响应后200字符: {api_response[-200:]}")
+            
             # 清理响应内容，移除可能的markdown代码块标记
             cleaned_response = api_response.strip()
             if cleaned_response.startswith('```json'):
@@ -256,20 +294,66 @@ $document_content
             
             cleaned_response = cleaned_response.strip()
             
-            # 尝试提取JSON内容
-            json_match = re.search(r'\{.*\}', cleaned_response, re.DOTALL)
-            if not json_match:
-                self.colored_logger.error(f"❌ API响应中未找到有效的JSON内容")
-                return ThesisStatement()
-            
-            json_str = json_match.group(0)
-            
-            # 尝试解析JSON
+            # 改进：先尝试直接解析整个响应
             try:
-                parsed_data = json.loads(json_str)
-            except json.JSONDecodeError as e:
-                self.colored_logger.error(f"❌ JSON解析失败: {e}")
-                return ThesisStatement()
+                parsed_data = json.loads(cleaned_response)
+                self.colored_logger.debug(f"✅ 直接解析成功")
+            except json.JSONDecodeError as direct_error:
+                self.colored_logger.debug(f"直接解析失败，尝试提取JSON: {direct_error}")
+                
+                # 如果直接解析失败，使用正则提取
+                # 改用非贪婪匹配，从第一个 { 开始尝试找到完整的 JSON 对象
+                json_match = None
+                
+                # 尝试多种正则模式
+                patterns = [
+                    r'\{(?:[^{}]|(?:\{[^{}]*\}))*\}',  # 非贪婪匹配，支持一层嵌套
+                    r'\{.*?\}(?=\s*$)',  # 非贪婪匹配到文档末尾
+                    r'\{.*\}',  # 贪婪匹配（兜底）
+                ]
+                
+                for i, pattern in enumerate(patterns):
+                    json_match = re.search(pattern, cleaned_response, re.DOTALL)
+                    if json_match:
+                        self.colored_logger.debug(f"使用模式 {i+1} 匹配成功")
+                        break
+                
+                if not json_match:
+                    self.colored_logger.error(f"❌ API响应中未找到有效的JSON内容")
+                    self.colored_logger.error(f"响应内容前500字符: {cleaned_response[:500]}...")
+                    return ThesisStatement()
+                
+                json_str = json_match.group(0)
+                self.colored_logger.debug(f"提取的JSON长度: {len(json_str)} 字符")
+                
+                # 尝试解析JSON
+                try:
+                    parsed_data = json.loads(json_str)
+                    self.colored_logger.debug(f"✅ 正则提取后解析成功")
+                except json.JSONDecodeError as e:
+                    self.colored_logger.error(f"❌ JSON解析失败: {e}")
+                    self.colored_logger.error(f"JSON内容前500字符: {json_str[:500]}")
+                    self.colored_logger.error(f"JSON内容后500字符: {json_str[-500:]}")
+                    
+                    # 尝试找到JSON截断的位置
+                    try:
+                        # 逐步减少内容长度，尝试找到有效的JSON
+                        for trim_length in [100, 500, 1000, 2000]:
+                            if len(json_str) > trim_length:
+                                trimmed_json = json_str[:-trim_length]
+                                # 尝试补全最后的大括号
+                                if trimmed_json.count('{') > trimmed_json.count('}'):
+                                    trimmed_json += '}'
+                                try:
+                                    parsed_data = json.loads(trimmed_json)
+                                    self.colored_logger.warning(f"⚠️ 通过截断修复JSON成功（截断 {trim_length} 字符）")
+                                    break
+                                except:
+                                    continue
+                        else:
+                            return ThesisStatement()
+                    except:
+                        return ThesisStatement()
             
             # 构建ThesisStatement对象
             thesis_statement = ThesisStatement(
@@ -278,12 +362,14 @@ $document_content
                 key_concepts=parsed_data.get('key_concepts', [])
             )
             
-            self.colored_logger.debug(f"✅ 成功解析API响应，提取论点: {thesis_statement.main_thesis}")
+            self.colored_logger.info(f"✅ 成功解析API响应，提取论点: {thesis_statement.main_thesis[:100]}...")
             
             return thesis_statement
             
         except Exception as e:
             self.colored_logger.error(f"❌ 响应解析失败: {e}")
+            import traceback
+            self.colored_logger.error(f"完整错误信息: {traceback.format_exc()}")
             return ThesisStatement()
     
     def save_thesis_statement(self, thesis: ThesisStatement, document_title: str, output_path: str = None) -> str:

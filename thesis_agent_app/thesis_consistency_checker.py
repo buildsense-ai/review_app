@@ -67,6 +67,17 @@ class ThesisConsistencyChecker:
 **支撑论据**: $supporting_arguments
 **关键概念**: $key_concepts
 
+# 文档章节列表（重要！）
+以下是文档中的所有章节标题，你在返回结果时**必须使用这些确切的标题**，不要自己创造或修改标题：
+
+$section_titles_list
+
+**关键要求**：
+- 你的 JSON 输出中的 "section_title" 字段必须**完全匹配**上述列表中的某个标题
+- 包括所有编号、标点符号、空格都必须完全一致
+- 绝对不允许使用不在列表中的标题
+- 绝对不允许修改、简化或重写标题
+
 # 评估范围限制（重要）
 只评估"正文"段落，严格忽略以下所有非正文内容：
 1) 任何"### 相关图片资料"标题及其后的图片描述/图片来源/图片Markdown（直到下一个二级标题`## `或文末）。
@@ -85,11 +96,11 @@ class ThesisConsistencyChecker:
 5. **可优化 (optimization)**: 章节内容基本合理，但可以通过加强论证、优化表述、增强与核心论点的关联等方式进一步改进
 
 # 输出要求（仅JSON）
-你的最终输出必须是一个结构化的 JSON 数组，**必须包含对每个章节的分析**：
+你的最终输出必须是一个结构化的 JSON 数组：
 
 [
   {
-    "section_title": "章节标题",
+    "section_title": "必须是上述章节列表中的确切标题",
     "issue_type": "问题类型 (contradiction/irrelevant/weak_support/unclear/optimization)",
     "description": "问题的详细描述或优化点分析",
     "evidence": "支持该判断的具体证据（引用章节中的关键句子）",
@@ -99,18 +110,22 @@ class ThesisConsistencyChecker:
 
 # 工作流程
 1) 仔细阅读核心论点及其相关要素
-2) 逐个分析每个章节的正文内容
-3) 判断每个章节与核心论点的关系
-4) 识别不一致、矛盾、偏离或可优化的地方
-5) **对每个章节都必须提供具体的改进建议**
-6) 严格按照JSON数组格式返回结果，不要包含任何其他文字说明
+2) 查看文档章节列表，记住所有确切的标题
+3) 逐个分析每个章节的正文内容
+4) 判断每个章节与核心论点的关系
+5) 识别不一致、矛盾、偏离或可优化的地方
+6) **在返回 section_title 时，必须从上述章节列表中精确复制标题**
+7) 严格按照JSON数组格式返回结果，不要包含任何其他文字说明
 
-**严格要求：绝对不允许返回空数组。每个章节都必须有对应的分析结果和改进建议。**
+**严格要求**：
+- 只分析存在问题或可优化的章节，不需要分析所有章节
+- section_title 必须完全匹配章节列表中的标题
+- 不要创造、修改或简化章节标题
 
 待检查文档：
 $document_content
 
-请严格遵循以上要求，只返回JSON格式结果。必须对每个章节都提供分析和建议。"""
+请严格遵循以上要求，只返回JSON格式结果。"""
 
         self.colored_logger.info("✅ ThesisConsistencyChecker 初始化完成")
     
@@ -183,11 +198,23 @@ $document_content
             str: API响应内容
         """
         try:
-            # 构建提示词，替换论点信息
+            # 提取文档中的所有章节标题
+            section_titles = self._extract_section_titles(document_content)
+            
+            # 格式化章节标题列表为带编号的列表
+            if section_titles:
+                section_titles_formatted = '\n'.join([f"{i+1}. {title}" for i, title in enumerate(section_titles)])
+                self.colored_logger.info(f"📋 提取到 {len(section_titles)} 个章节标题")
+            else:
+                section_titles_formatted = "(未找到章节标题)"
+                self.colored_logger.warning("⚠️ 未能提取到章节标题")
+            
+            # 构建提示词，替换所有变量
             prompt = self.consistency_check_prompt.replace('$document_content', document_content)
             prompt = prompt.replace('$main_thesis', thesis_statement.main_thesis)
             prompt = prompt.replace('$supporting_arguments', ', '.join(thesis_statement.supporting_arguments))
             prompt = prompt.replace('$key_concepts', ', '.join(thesis_statement.key_concepts))
+            prompt = prompt.replace('$section_titles_list', section_titles_formatted)
             
             self.colored_logger.info(f"📄 文档内容长度: {len(document_content)}字符")
             self.colored_logger.info(f"🎯 核心论点: {thesis_statement.main_thesis[:100]}...")

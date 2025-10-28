@@ -4,6 +4,7 @@
 """
 
 from fastapi import APIRouter, HTTPException, BackgroundTasks
+from fastapi.responses import StreamingResponse
 from typing import Optional, Dict, Any
 import os
 import sys
@@ -53,6 +54,33 @@ def update_task_status(task_id: str, status: str, progress: float, message: str,
 def parse_hierarchical_sections(content: str) -> Dict[str, Dict[str, str]]:
     """解析Markdown内容为层级结构（使用统一的DocumentParser）"""
     return DocumentParser.parse_sections(content, max_level=3, preserve_order=True)
+
+def find_section_in_parsed(parsed_sections: Dict[str, Dict[str, str]], 
+                          target_title: str) -> Optional[tuple]:
+    """
+    在解析后的章节结构中查找目标章节
+    
+    Args:
+        parsed_sections: 解析后的章节结构
+        target_title: 目标章节标题
+        
+    Returns:
+        Optional[tuple]: (h1_title, section_key, content) 或 None
+    """
+    # 清理目标标题
+    clean_target = target_title.strip().replace('#', '').strip()
+    
+    for h1_title, h2_sections in parsed_sections.items():
+        for section_key, content in h2_sections.items():
+            # 尝试多种匹配方式
+            clean_section = section_key.strip()
+            
+            if (clean_target == clean_section or 
+                clean_target in clean_section or 
+                clean_section in clean_target):
+                return (h1_title, section_key, content)
+    
+    return None
 
 def generate_unified_sections(original_content: str, corrected_content: str, consistency_issues: list, regenerated_sections: dict) -> Dict[str, Any]:
     """基于真实AI分析结果生成unified_sections数据"""
@@ -402,6 +430,344 @@ async def get_flat_result(task_id: str):
             raise HTTPException(status_code=500, detail=f"读取文件失败: {str(e)}")
     else:
         raise HTTPException(status_code=404, detail="未找到unified_sections文件")
+
+@router.post("/v1/pipeline-stream", summary="流式论点一致性检查处理")
+async def pipeline_stream(request: PipelineRequest):
+    """
+    流式执行论点一致性检查流水线，实时推送处理进度
+    
+    返回 SSE (Server-Sent Events) 流，前端可实时接收进度更新
+    """
+    
+    def format_sse_message(event: str, data: dict) -> str:
+        """格式化 SSE 消息"""
+        json_data = json.dumps(data, ensure_ascii=False)
+        return f"event: {event}\ndata: {json_data}\n\n"
+    
+    async def generate():
+        """生成 SSE 事件流"""
+        try:
+            # 阶段1：任务提交 (0%)
+            yield format_sse_message("progress", {
+                "status": "submitting",
+                "message": "任务已提交",
+                "progress": 0
+            })
+            await asyncio.sleep(0.1)
+            
+            # 阶段2：开始提取论点 (10%)
+            yield format_sse_message("progress", {
+                "status": "extracting",
+                "message": "开始AI提取文档论点",
+                "progress": 10
+            })
+            
+            # 添加thesis_agent_app到Python路径
+            thesis_agent_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "thesis_agent_app")
+            if thesis_agent_path not in sys.path:
+                sys.path.insert(0, thesis_agent_path)
+            
+            # 导入thesis agent的核心模块
+            try:
+                from thesis_extractor import ThesisExtractor
+                from thesis_consistency_checker import ThesisConsistencyChecker
+                from document_regenerator import ThesisDocumentRegenerator
+            except ImportError as e:
+                logger.error(f"导入thesis_agent模块失败: {e}")
+                raise Exception(f"导入thesis_agent模块失败: {str(e)}")
+            
+            # 设置默认标题
+            document_title = request.document_title or "未命名文档"
+            
+            # 第一步：提取论点 (在独立线程中运行同步代码)
+            extractor = ThesisExtractor()
+            thesis_statement = await asyncio.to_thread(
+                extractor.extract_thesis_from_document,
+                request.document_content,
+                document_title
+            )
+            
+            # 阶段3：论点提取完成，开始一致性检查 (20%)
+            yield format_sse_message("progress", {
+                "status": "checking",
+                "message": "论点提取完成，开始检查一致性",
+                "progress": 20
+            })
+            await asyncio.sleep(0.1)
+            
+            # 第二步：检查一致性
+            checker = ThesisConsistencyChecker()
+            consistency_analysis = await asyncio.to_thread(
+                checker.check_consistency,
+                request.document_content,
+                thesis_statement,
+                document_title
+            )
+            
+            consistency_issues = consistency_analysis.consistency_issues
+            total_chapters = len(consistency_issues)
+            
+            # 阶段4：一致性检查完成 (30%)
+            if total_chapters == 0:
+                yield format_sse_message("progress", {
+                    "status": "completed",
+                    "message": "文档论点一致性良好，无需修正",
+                    "progress": 100
+                })
+                yield format_sse_message("result", {"chapters": []})
+                yield format_sse_message("end", {"status": "completed"})
+                return
+            
+            yield format_sse_message("progress", {
+                "status": "analyzed",
+                "message": f"一致性检查完成，发现 {total_chapters} 个需要修正的章节",
+                "progress": 30
+            })
+            await asyncio.sleep(0.2)
+            
+            # 阶段5：解析文档章节 (35%)
+            yield format_sse_message("progress", {
+                "status": "parsing",
+                "message": "解析文档章节结构",
+                "progress": 35
+            })
+            
+            parsed_sections = await asyncio.to_thread(
+                parse_hierarchical_sections,
+                request.document_content
+            )
+            
+            # 阶段6：逐章节处理（并行处理，最多3个并发）(40-90%)
+            regenerated_sections = {}
+            
+            # 准备所有任务
+            tasks_info = []
+            regenerator = ThesisDocumentRegenerator()
+            
+            # 准备论点数据
+            thesis_data = {
+                "main_thesis": thesis_statement.main_thesis,
+                "supporting_arguments": thesis_statement.supporting_arguments,
+                "key_concepts": thesis_statement.key_concepts
+            }
+            
+            for issue in consistency_issues:
+                section_title = issue.section_title
+                section_info = find_section_in_parsed(parsed_sections, section_title)
+                
+                if section_info:
+                    h1_title, section_key, original_content = section_info
+                    tasks_info.append({
+                        'section_title': section_title,
+                        'h1_title': h1_title,
+                        'section_key': section_key,
+                        'original_content': original_content,
+                        'issue_description': issue.description,
+                        'suggestion': issue.suggestion
+                    })
+                else:
+                    logger.warning(f"未找到章节: {section_title}")
+            
+            # 如果没有有效任务，跳过处理
+            if not tasks_info:
+                logger.warning("没有找到需要修正的章节")
+                yield format_sse_message("progress", {
+                    "status": "completed",
+                    "message": "未找到需要修正的章节",
+                    "progress": 100
+                })
+                yield format_sse_message("result", {"chapters": []})
+                yield format_sse_message("end", {"status": "completed"})
+                return
+            
+            # 使用信号量控制并发数
+            semaphore = asyncio.Semaphore(3)
+            
+            # 异步处理单个章节的包装函数
+            async def process_single_section(task_info, task_index):
+                """处理单个章节并返回结果"""
+                async with semaphore:
+                    try:
+                        # 调用 regenerate_section_with_thesis 方法
+                        result_dict = await asyncio.to_thread(
+                            regenerator.regenerate_section_with_thesis,
+                            task_info['section_title'],
+                            task_info['original_content'],
+                            {
+                                "issue_description": task_info['issue_description'],
+                                "suggestion": task_info['suggestion']
+                            },
+                            thesis_data
+                        )
+                        
+                        # 从返回的字典中提取内容
+                        regenerated_content = result_dict.get('content', '')
+                        
+                        # 检查生成内容是否有效
+                        if not regenerated_content or len(regenerated_content.strip()) == 0:
+                            logger.warning(f"章节修正返回空内容: {task_info['section_title']}")
+                            return {
+                                'success': False,
+                                'task_index': task_index,
+                                'section_title': task_info['section_title'],
+                                'error': '返回内容为空'
+                            }
+                        
+                        return {
+                            'success': True,
+                            'task_index': task_index,
+                            'section_title': task_info['section_title'],
+                            'h1_title': task_info['h1_title'],
+                            'section_key': task_info['section_key'],
+                            'original_content': task_info['original_content'],
+                            'regenerated_content': regenerated_content,
+                            'issue_description': task_info['issue_description'],
+                            'suggestion': task_info['suggestion'],
+                        }
+                    except Exception as e:
+                        logger.error(f"章节修正失败 {task_info['section_title']}: {e}")
+                        return {
+                            'success': False,
+                            'task_index': task_index,
+                            'section_title': task_info['section_title'],
+                            'error': str(e)
+                        }
+            
+            # 创建所有并发任务
+            logger.info(f"开始并行处理 {len(tasks_info)} 个章节（最大并发数: 3）")
+            pending_tasks = [
+                asyncio.create_task(process_single_section(task_info, idx))
+                for idx, task_info in enumerate(tasks_info, 1)
+            ]
+            
+            # 使用 as_completed 按完成顺序处理结果
+            completed_count = 0
+            for completed_task in asyncio.as_completed(pending_tasks):
+                result = await completed_task
+                completed_count += 1
+                
+                # 计算进度 (40% -> 90%)
+                progress = 40 + int((completed_count / len(tasks_info)) * 50)
+                
+                if result['success']:
+                    # 保存修正结果
+                    full_key = f"{result['h1_title']} > {result['section_key']}"
+                    regenerated_sections[full_key] = {
+                        'h1_title': result['h1_title'],
+                        'section_key': result['section_key'],
+                        'original_content': result['original_content'],
+                        'regenerated_content': result['regenerated_content'],
+                        'issue_description': result['issue_description'],
+                        'suggestion': result['suggestion'],
+                        'word_count': len(result['regenerated_content']),
+                        'status': 'identified'
+                    }
+                    
+                    # 推送进度更新（成功）
+                    yield format_sse_message("progress", {
+                        "status": "processing",
+                        "message": f"完成章节 {completed_count}/{len(tasks_info)}: {result['section_title']}",
+                        "progress": progress,
+                        "current_chapter": completed_count,
+                        "total_chapters": len(tasks_info)
+                    })
+                    logger.info(f"章节完成 ({completed_count}/{len(tasks_info)}): {result['section_title']}")
+                else:
+                    # 推送进度更新（失败）
+                    yield format_sse_message("progress", {
+                        "status": "processing",
+                        "message": f"章节处理失败 {completed_count}/{len(tasks_info)}: {result['section_title']}",
+                        "progress": progress,
+                        "current_chapter": completed_count,
+                        "total_chapters": len(tasks_info),
+                        "error": result.get('error', '未知错误')
+                    })
+                    logger.warning(f"章节失败 ({completed_count}/{len(tasks_info)}): {result['section_title']} - {result.get('error')}")
+                
+                # 短暂延迟，避免前端更新过快
+                await asyncio.sleep(0.05)
+            
+            logger.info(f"并行处理完成，成功修正 {len(regenerated_sections)}/{len(tasks_info)} 个章节")
+            
+            # 阶段7：构建输出 (95%)
+            yield format_sse_message("progress", {
+                "status": "finalizing",
+                "message": "生成最终结果",
+                "progress": 95
+            })
+            
+            # 构建 unified_sections 格式
+            unified_sections = {}
+            for h1_title in parsed_sections.keys():
+                unified_sections[h1_title] = {}
+            
+            for full_key, section_data in regenerated_sections.items():
+                h1_title = section_data['h1_title']
+                section_key = section_data['section_key']
+                
+                if h1_title not in unified_sections:
+                    unified_sections[h1_title] = {}
+                
+                unified_sections[h1_title][section_key] = {
+                    "original_content": section_data['original_content'],
+                    "suggestion": f"一致性问题: {section_data['issue_description']}. 建议: {section_data['suggestion']}",
+                    "regenerated_content": section_data['regenerated_content'],
+                    "word_count": section_data['word_count'],
+                    "status": section_data['status']
+                }
+            
+            # 转换为扁平结构
+            chapters = []
+            for part_name, sections in unified_sections.items():
+                for section_name, content in sections.items():
+                    if isinstance(content, dict) and content.get("status") in ["identified", "corrected"]:
+                        chapters.append({
+                            "original_text": content.get("original_content", ""),
+                            "edit_text": content.get("regenerated_content", ""),
+                            "comment": content.get("suggestion", "")
+                        })
+            
+            # 保存结果到文件
+            task_id = str(uuid.uuid4())
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
+            results_dir = Path(__file__).parent.parent / "outputs" / "thesis"
+            results_dir.mkdir(parents=True, exist_ok=True)
+            unified_sections_file = results_dir / f"thesis_agent_unified_{task_id}_{timestamp}.json"
+            
+            with open(unified_sections_file, 'w', encoding='utf-8') as f:
+                json.dump(unified_sections, f, ensure_ascii=False, indent=2)
+            
+            # 阶段8：返回最终结果 (100%)
+            yield format_sse_message("result", {
+                "chapters": chapters,
+                "summary": f"论点一致性检查完成，共修正 {len(chapters)} 个章节",
+                "saved_file": str(unified_sections_file)
+            })
+            
+            yield format_sse_message("end", {
+                "status": "completed",
+                "progress": 100
+            })
+            
+        except Exception as e:
+            logger.error(f"流式处理失败: {e}")
+            import traceback
+            traceback.print_exc()
+            yield format_sse_message("error", {
+                "error": str(e),
+                "message": "处理失败"
+            })
+    
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "Access-Control-Allow-Origin": "*",
+            "X-Accel-Buffering": "no"
+        }
+    )
 
 @router.get("/v1/download/{task_id}", summary="下载处理结果")
 async def download_result(task_id: str):

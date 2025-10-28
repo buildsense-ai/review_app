@@ -16,6 +16,7 @@ import sys
 BASE_URL = "http://localhost:8010"
 REDUNDANCY_STREAM_API = f"{BASE_URL}/api/redundancy-agent/v1/pipeline-stream"
 TABLE_STREAM_API = f"{BASE_URL}/api/table-agent/v1/pipeline-stream"
+THESIS_STREAM_API = f"{BASE_URL}/api/thesis-agent/v1/pipeline-stream"
 
 # 测试文档内容
 TEST_DOCUMENT = """
@@ -278,6 +279,133 @@ def test_table_stream():
         traceback.print_exc()
 
 
+def test_thesis_stream():
+    """测试论点一致性检查流式API"""
+    print("=" * 80)
+    print("测试论点一致性检查流式API")
+    print("=" * 80)
+    
+    payload = {
+        "document_content": TEST_DOCUMENT,
+        "document_title": "测试文档",
+        "auto_correct": True
+    }
+    
+    try:
+        print(f"\n连接到流式端点: {THESIS_STREAM_API}")
+        print("开始接收 SSE 事件流...\n")
+        
+        response = requests.post(
+            THESIS_STREAM_API,
+            json=payload,
+            stream=True,
+            timeout=300
+        )
+        
+        if response.status_code != 200:
+            print(f"❌ 请求失败，状态码: {response.status_code}")
+            print(response.text)
+            return
+        
+        event_type = None
+        data_buffer = ""
+        result_data = None
+        progress_count = 0
+        
+        for line in response.iter_lines():
+            if not line:
+                continue
+                
+            line = line.decode('utf-8')
+            
+            if line.startswith('event:'):
+                event_type = line.split(':', 1)[1].strip()
+            elif line.startswith('data:'):
+                data_str = line.split(':', 1)[1].strip()
+                
+                try:
+                    data = json.loads(data_str)
+                    
+                    if event_type == 'progress':
+                        progress_count += 1
+                        status = data.get('status', '')
+                        message = data.get('message', '')
+                        progress = data.get('progress', 0)
+                        current = data.get('current_chapter', '')
+                        total = data.get('total_chapters', '')
+                        
+                        # 状态图标
+                        status_icons = {
+                            'submitting': '📝',
+                            'extracting': '🔍',
+                            'checking': '✅',
+                            'analyzed': '📊',
+                            'parsing': '📖',
+                            'processing': '⚙️',
+                            'finalizing': '🎯',
+                            'completed': '✨'
+                        }
+                        icon = status_icons.get(status, '📌')
+                        
+                        if current and total:
+                            print(f"{icon} [{progress:3.0f}%] {message} ({current}/{total})")
+                        else:
+                            print(f"{icon} [{progress:3.0f}%] {message}")
+                    
+                    elif event_type == 'result':
+                        result_data = data
+                        chapters_count = len(data.get('chapters', []))
+                        summary = data.get('summary', '')
+                        print(f"\n{'='*80}")
+                        print(f"✅ {summary}")
+                        print(f"共修正 {chapters_count} 个章节")
+                        print(f"{'='*80}")
+                    
+                    elif event_type == 'end':
+                        print(f"\n🎉 处理完成!")
+                        break
+                    
+                    elif event_type == 'error':
+                        error = data.get('error', '未知错误')
+                        message = data.get('message', '')
+                        print(f"\n❌ {message}: {error}")
+                        break
+                    
+                except json.JSONDecodeError:
+                    print(f"❌ JSON解析失败: {data_str}")
+                    continue
+                except Exception as e:
+                    print(f"\n❌ 错误: {error}")
+                    break
+        
+        print("-" * 80)
+        
+        if result_data and result_data.get('chapters'):
+            print("\n详细结果预览（前2个章节）:")
+            for i, chapter in enumerate(result_data['chapters'][:2], 1):
+                print(f"\n章节 {i}:")
+                print(f"  原文长度: {len(chapter.get('original_text', ''))} 字符")
+                print(f"  修改后长度: {len(chapter.get('edit_text', ''))} 字符")
+                comment = chapter.get('comment', '')
+                if len(comment) > 100:
+                    print(f"  一致性问题: {comment[:100]}...")
+                else:
+                    print(f"  一致性问题: {comment}")
+        
+        print("\n" + "=" * 80)
+        print("论点一致性检查测试完成")
+        print("=" * 80)
+        
+    except requests.exceptions.Timeout:
+        print("❌ 请求超时")
+    except requests.exceptions.ConnectionError:
+        print("❌ 连接失败，请确保服务器正在运行")
+    except Exception as e:
+        print(f"❌ 发生错误: {e}")
+        import traceback
+        traceback.print_exc()
+
+
 if __name__ == "__main__":
     if len(sys.argv) > 1:
         test_type = sys.argv[1].lower()
@@ -285,9 +413,11 @@ if __name__ == "__main__":
             test_redundancy_stream()
         elif test_type == "table":
             test_table_stream()
+        elif test_type == "thesis":
+            test_thesis_stream()
         else:
             print(f"未知的测试类型: {test_type}")
-            print("用法: python test_stream_api.py [redundancy|table]")
+            print("用法: python test_stream_api.py [redundancy|table|thesis]")
     else:
         # 默认测试冗余优化
         test_redundancy_stream()
@@ -298,6 +428,12 @@ if __name__ == "__main__":
             choice = input().strip().lower()
             if choice == 'y':
                 test_table_stream()
+                
+                # 询问是否继续测试论点一致性检查
+                print("\n是否继续测试论点一致性检查流式API? (y/n): ", end="")
+                choice = input().strip().lower()
+                if choice == 'y':
+                    test_thesis_stream()
         except KeyboardInterrupt:
             print("\n\n测试已取消")
 

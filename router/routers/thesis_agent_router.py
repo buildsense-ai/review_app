@@ -349,6 +349,60 @@ async def get_unified_sections(task_id: str):
     else:
         raise HTTPException(status_code=404, detail="未找到unified_sections文件")
 
+@router.get("/v1/result-flat/{task_id}", summary="获取论点一致性检查结果（扁平结构）")
+async def get_flat_result(task_id: str):
+    """
+    获取论点一致性检查结果（扁平结构，供前端使用）
+    
+    - **task_id**: 任务ID
+    
+    返回扁平化的chapters数组，格式为：
+    {
+        "chapters": [
+            {
+                "original_text": "原始文本",
+                "edit_text": "优化后文本",
+                "comment": "优化说明"
+            }
+        ]
+    }
+    """
+    if not task_manager.task_exists(task_id):
+        raise HTTPException(status_code=404, detail="任务不存在")
+    
+    task_info = task_manager.get_task(task_id)
+    
+    if task_info["status"] != "completed":
+        raise HTTPException(status_code=400, detail="任务尚未完成")
+    
+    # 从结果中获取unified_sections文件路径并读取内容
+    result = task_info.get("result", {})
+    if isinstance(result, dict) and "unified_sections_file" in result:
+        unified_sections_file = result["unified_sections_file"]
+        
+        try:
+            with open(unified_sections_file, 'r', encoding='utf-8') as f:
+                unified_sections_data = json.load(f)
+            
+            # 转换为扁平结构
+            chapters = []
+            for part_name, sections in unified_sections_data.items():
+                for section_name, content in sections.items():
+                    if isinstance(content, dict) and content.get("status") in ["identified", "corrected"]:
+                        chapters.append({
+                            "original_text": content.get("original_content", ""),
+                            "edit_text": content.get("regenerated_content", ""),
+                            "comment": content.get("suggestion", "")
+                        })
+            
+            return {"chapters": chapters}
+        except FileNotFoundError:
+            raise HTTPException(status_code=404, detail="unified_sections文件不存在")
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"读取文件失败: {str(e)}")
+    else:
+        raise HTTPException(status_code=404, detail="未找到unified_sections文件")
+
 @router.get("/v1/download/{task_id}", summary="下载处理结果")
 async def download_result(task_id: str):
     """

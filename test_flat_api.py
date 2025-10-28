@@ -16,6 +16,7 @@ import json
 BASE_URL = "http://localhost:8010"
 REDUNDANCY_API = f"{BASE_URL}/api/redundancy-agent"
 TABLE_API = f"{BASE_URL}/api/table-agent"
+THESIS_API = f"{BASE_URL}/api/thesis-agent"
 
 # 测试文档内容
 TEST_DOCUMENT = """
@@ -239,6 +240,126 @@ def test_table_flat_api():
     print("测试完成！")
     print("=" * 60)
 
+def test_thesis_flat_api():
+    """测试论点一致性检查的扁平化API"""
+    print("=" * 60)
+    print("测试论点一致性检查扁平化API")
+    print("=" * 60)
+    
+    # 1. 提交异步任务
+    print("\n[步骤 1] 提交异步任务...")
+    payload = {
+        "document_content": TEST_DOCUMENT,
+        "document_title": "测试文档",
+        "auto_correct": True
+    }
+    
+    response = requests.post(f"{THESIS_API}/v1/pipeline-async", json=payload)
+    if response.status_code != 200:
+        print(f"❌ 提交任务失败: {response.status_code}")
+        print(response.text)
+        return
+    
+    result = response.json()
+    task_id = result.get("task_id")
+    print(f"✅ 任务已提交，task_id: {task_id}")
+    
+    # 2. 轮询任务状态
+    print("\n[步骤 2] 轮询任务状态...")
+    max_attempts = 60
+    attempt = 0
+    
+    while attempt < max_attempts:
+        time.sleep(2)
+        attempt += 1
+        
+        response = requests.get(f"{THESIS_API}/v1/task/{task_id}")
+        if response.status_code != 200:
+            print(f"❌ 查询任务状态失败: {response.status_code}")
+            return
+        
+        task_status = response.json()
+        status = task_status.get("status")
+        progress = task_status.get("progress", 0)
+        message = task_status.get("message", "")
+        
+        print(f"  [{attempt}] 状态: {status}, 进度: {progress:.1f}%, 消息: {message}")
+        
+        if status == "completed":
+            print("✅ 任务完成")
+            break
+        elif status == "failed":
+            error = task_status.get("error", "未知错误")
+            print(f"❌ 任务失败: {error}")
+            return
+    else:
+        print("❌ 任务超时")
+        return
+    
+    # 3. 获取嵌套结构结果（原有API）
+    print("\n[步骤 3] 获取嵌套结构结果...")
+    response = requests.get(f"{THESIS_API}/v1/result/{task_id}")
+    if response.status_code != 200:
+        print(f"❌ 获取嵌套结果失败: {response.status_code}")
+        print(response.text)
+        return
+    
+    nested_result = response.json()
+    print(f"✅ 嵌套结构结果获取成功")
+    print(f"  结构: {list(nested_result.keys())}")
+    
+    # 统计有多少identified和corrected的章节
+    identified_count = 0
+    corrected_count = 0
+    for part_name, sections in nested_result.items():
+        for section_name, content in sections.items():
+            if isinstance(content, dict):
+                if content.get("status") == "identified":
+                    identified_count += 1
+                elif content.get("status") == "corrected":
+                    corrected_count += 1
+    print(f"  包含 {identified_count} 个已识别问题的章节")
+    print(f"  包含 {corrected_count} 个已修正的章节")
+    print(f"  总计: {identified_count + corrected_count} 个章节")
+    
+    # 4. 获取扁平化结果（新API）
+    print("\n[步骤 4] 获取扁平化结果...")
+    response = requests.get(f"{THESIS_API}/v1/result-flat/{task_id}")
+    if response.status_code != 200:
+        print(f"❌ 获取扁平化结果失败: {response.status_code}")
+        print(response.text)
+        return
+    
+    flat_result = response.json()
+    print(f"✅ 扁平化结果获取成功")
+    
+    # 验证扁平化结果结构
+    if "chapters" not in flat_result:
+        print(f"❌ 扁平化结果格式错误: 缺少 'chapters' 字段")
+        return
+    
+    chapters = flat_result["chapters"]
+    print(f"  包含 {len(chapters)} 个章节")
+    
+    # 显示前2个章节的详细信息
+    for i, chapter in enumerate(chapters[:2], 1):
+        print(f"\n  章节 {i}:")
+        print(f"    - original_text 长度: {len(chapter.get('original_text', ''))} 字符")
+        print(f"    - edit_text 长度: {len(chapter.get('edit_text', ''))} 字符")
+        print(f"    - comment 长度: {len(chapter.get('comment', ''))} 字符")
+        if chapter.get('comment'):
+            print(f"    - comment 内容: {chapter['comment'][:100]}...")
+    
+    # 打印完整的扁平化结果（JSON字符串）
+    print("\n" + "=" * 60)
+    print("完整的扁平化结果输出：")
+    print("=" * 60)
+    print(json.dumps(flat_result, ensure_ascii=False, indent=2))
+    
+    print("\n" + "=" * 60)
+    print("测试完成！")
+    print("=" * 60)
+
 if __name__ == "__main__":
     import sys
     
@@ -248,9 +369,11 @@ if __name__ == "__main__":
             test_redundancy_flat_api()
         elif test_type == "table":
             test_table_flat_api()
+        elif test_type == "thesis":
+            test_thesis_flat_api()
         else:
             print(f"未知的测试类型: {test_type}")
-            print("用法: python test_flat_api.py [redundancy|table]")
+            print("用法: python test_flat_api.py [redundancy|table|thesis]")
     else:
         # 默认测试冗余优化
         test_redundancy_flat_api()
@@ -261,4 +384,11 @@ if __name__ == "__main__":
         if choice == 'y':
             print("\n")
             test_table_flat_api()
+            
+            # 询问是否继续测试论点一致性检查
+            print("\n是否继续测试论点一致性检查API? (y/n): ", end="")
+            choice = input().strip().lower()
+            if choice == 'y':
+                print("\n")
+                test_thesis_flat_api()
 
